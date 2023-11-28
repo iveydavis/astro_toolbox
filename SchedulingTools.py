@@ -10,6 +10,7 @@ from astropy import units as u
 from astropy.coordinates import get_sun, get_moon
 from astropy.coordinates import AltAz, SkyCoord
 from astroquery.simbad import Simbad as Simbad
+Simbad.add_votable_fields('distance')
 from astropy.table import Table
 from astropy.time import Time
 from astropy.coordinates import EarthLocation

@@ -225,6 +225,18 @@ class FluxTools:
         return flux*intTime
 
     def CalculateRequiredIntTime(self,mag,diameter,nPhot):
+        """
+        Calculates the integration time required to acquire nPhot number of photons from a mag magnitude source
+        :param mag: magnitude of the source
+        :type mag: float
+        :param diameter: diameter of the telescope primary
+        :type diameter: astropy.units.quantity.Quantity
+        :param nPhot: number of photons from the source you want to receive
+        :type nPhot: float
+        :return: integration time required to acquire nPhot number of photons from a mag magnitude source
+        :rtype: astropy.units.quantity.Quantity
+
+        """
         flux = self.CalculateFlux(mag,diameter)
         return nPhot/flux;
 
@@ -369,22 +381,22 @@ class FluxTools:
         flux = (luminosity/(4 * np.pi*distance**2)).to('erg/(s*m**2)')
         return flux
 
-    def CalculateContrast(self,quietTemp,flareTemp,radius,luminosity,includeTransmissivity = False):
+    def CalculateContrast(self,quietTemp,flareTemp,radius,flare_luminosity,includeTransmissivity = False):
         try:
-            luminosity.value
+            flare_luminosity.value
         except:
-            luminosity = luminosity*luminosityUnitsMult
+            flare_luminosity = flare_luminosity*luminosityUnitsMult
         flareLumBol = self.CalculateBolometricLuminosity(flareTemp,radius)
         """
         NOTE: This will be kinda inaccurate because you can't really include
         the transmissivity of the atmosphere in the bolometeric luminosity
         calculation
         """
-        flareLumBand = self.CalculateLuminosityOverBand(flareTemp,radius,includeTransmissivity)
-        quietLumBand = self.CalculateLuminosityOverBand(quietTemp,radius,includeTransmissivity)
+        flareLumBand = self.CalculateLuminosityOverBand(flareTemp,radius,includeTransmissivity) # Calculate flare luminosity in the band as if it were the size of the star
+        quietLumBand = self.CalculateLuminosityOverBand(quietTemp,radius,includeTransmissivity) # Calculate full-disk, quiet stellar luminosity in the band
         
-        fractionalFlareAreaBol = luminosity/flareLumBol
-        fractionalFlareLum = flareLumBand*fractionalFlareAreaBol
+        fractionalFlareAreaBol = flare_luminosity/flareLumBol # determine area of flare based on its assigned bolometric luminosity and what it would be if it were the size of the star
+        fractionalFlareLum = flareLumBand*fractionalFlareAreaBol # Multiply the flare, full-disk luminosity in the band by the fractional area it makes up on the star
         return fractionalFlareLum/quietLumBand
     
     
@@ -507,10 +519,10 @@ def CalculateNoise(D, integrationTime, nPix, readoutNoise = 6, magVec = np.linsp
     
     plt.xlabel('Star Magnitude',fontsize = 14)
     plt.ylabel(r'ppm',fontsize = 14)
-    plt.title(r'$n_{pix}$ = '+str(int(nPix))+r', $\chi$ = '+str(chi)+', # Frames = '+str(int(nFrames))+', D = '+str(D),fontsize=14)
+    plt.title(r'$n_{pix}$ = '+str(int(nPix))+r', $\chi$ = '+str(chi)+', # Frames = '+str(int(nFrames))+', Exp. time/frame = '+str(integrationTime/nFrames),fontsize=14)
     plt.legend(fontsize = 12)
     plt.tight_layout()
-    plt.xlim((3,15.5))
+    plt.xlim((magVec.min(),magVec.max()))
     plt.xticks(fontsize = 15)
     plt.yticks(fontsize = 15)
     plt.grid('on')
@@ -566,7 +578,7 @@ def CalculateFluxRatioFromFill(x,Tq = 5080,Tf = 9000):
     return Lf
     
 
-def PlotContrasts(quietTemp = 5080*u.K, flareTemp = 9000*u.K,R = 0.735*const.R_sun, bolometricLum =np.linspace(10**30,10**34,1000)*u.erg/u.s ):
+def PlotContrasts(quietTemp = 5080*u.K, flareTemp = 10000*u.K,R = 0.735*const.R_sun, bolometricLum =np.linspace(10**30,10**34,1000)*u.erg/u.s ):
     plt.rcParams.update({'font.family':'calibri'})
     c_names = ['blue','green','red','maroon','mediumslateblue','teal','springgreen']
     uBandTools = FluxTools('u')
@@ -586,18 +598,19 @@ def PlotContrasts(quietTemp = 5080*u.K, flareTemp = 9000*u.K,R = 0.735*const.R_s
     #VContrast = VBandTools.CalculateContrast(quietTemp,flareTemp,R,bolometricLum,True)
 
     fig,ax = plt.subplots()
-    ax2 = ax.twinx()
-    ax3 = ax.twiny()
+    # ax2 = ax.twinx()
+    #ax3 = ax.twiny()
     
     #ax2 = ax.secondary_yaxis('right',functions = (CalculateDeltaMagFromContrast,CalculateContrastFromDeltaMag))
     
     x = np.linspace(min(iContrast),max(uContrast),len(bolometricLum))
     delta_mags = 2.5*np.log10(1+x)
-    print(delta_mags[0])
-    print(delta_mags[-1])
-    ax2.loglog(bolometricLum,delta_mags,alpha = 0)
-    #ax2.set_ylim(delta_mags[0],delta_mags[-1])
-    ax2.set_ylabel(r'$\log(\Delta$mag)',fontsize = 15)
+    # print(delta_mags[0])
+    # print(delta_mags[-1])
+    # ax2.loglog(bolometricLum,delta_mags,alpha = 0)
+    # #ax2.set_ylim(delta_mags[0],delta_mags[-1])
+    # ax2.set_ylabel(r'$\log(\Delta$mag)',fontsize = 15)
+    # ax2.tick_params(axis = 'both',labelsize = 13)
     
     
     ax.loglog(bolometricLum,uContrast,color = c_names[0],label = "u' band")
@@ -613,13 +626,13 @@ def PlotContrasts(quietTemp = 5080*u.K, flareTemp = 9000*u.K,R = 0.735*const.R_s
     ax.loglog(bolometricLum,bolometricLum/L,color = 'k',label= 'Bolometric contrast')
     ax.plot(np.linspace(L,L,100),np.linspace(min(iContrast),max(uContrast),100),'k--',label=r'Quiescent L$_{bol}$')
     
-    fillFactors = bolometricLum/L * (quietTemp/flareTemp)**4
-    ax3.loglog(fillFactors,bolometricLum,alpha = 0)
-    ax3.set_xlabel('Fill factor',fontsize = 15)
-    ax3.tick_params(axis = 'both',labelsize = 13)
+    #fillFactors = bolometricLum/L * (quietTemp/flareTemp)**4
+    #ax3.loglog(fillFactors,bolometricLum,alpha = 0)
+    #ax3.set_xlabel('Fill factor',fontsize = 15)
+    #ax3.tick_params(axis = 'both',labelsize = 13)
 
     #ax.set_title(r'Contrasts T$_{quiet}$ = '+str(int(quietTemp.value))+'K, R = '+str(float(R.to('R_sun').value))+r'R$_\odot$',fontsize = 15)
-    ax.set_title(r'Contrasts for T$_{quiet}$ = '+str(int(quietTemp.value))+'K, T$_{flare}$ = '+str(int(flareTemp.value))+'K',fontsize = 15)
+    #ax.set_title(r'Contrasts for T$_{quiet}$ = '+str(int(quietTemp.value))+'K, T$_{flare}$ = '+str(int(flareTemp.value))+'K',fontsize = 15)
     ax.set_xlabel(r'L$_{bol}$ [erg/s]',fontsize = 15)
     ax.set_ylabel(r'L$_{band,flare}$/L$_{band,quiet}$',fontsize = 15)
     ax.tick_params(axis = 'both',labelsize = 13)
@@ -627,7 +640,7 @@ def PlotContrasts(quietTemp = 5080*u.K, flareTemp = 9000*u.K,R = 0.735*const.R_s
 
     ax.legend()
     ax.grid('on')
-    ax.set_xlim((1e30,1e34))
+    ax.set_xlim((bolometricLum[0].value,bolometricLum[-1].value))
     plt.tight_layout()
     return
 

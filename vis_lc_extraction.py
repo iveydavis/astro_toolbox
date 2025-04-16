@@ -7,11 +7,12 @@ from astropy.io import fits
 from astropy import constants as const, units as un
 from astropy.time import Time
 from astropy.wcs import WCS
-from astropy.coordinates import SkyCoord,EarthLocation, get_sun, get_moon, AltAz, SkyCoord
-from astroquery.simbad import Simbad
+from astropy.nddata import Cutout2D
+from astropy.coordinates import SkyCoord
 
 from photutils.aperture import CircularAperture, aperture_photometry
 from photutils import DAOStarFinder, EllipticalAperture
+from SchedulingTools import AccessSIMBAD, ApplyProperMotion
 
 import matplotlib.pyplot as plt
 import palettable
@@ -47,23 +48,6 @@ def adjust_lightness(color, amount = 0.5):
         c = colorsys.rgb_to_hls(*mc.to_rgb(c))
     return colorsys.hls_to_rgb(c[0], max(0, min(1,amount*c[1])), c[2])
 
-def get_timestamp(fn, return_type=str):
-    """
-    Get timestamp of integration based on filename.
-    :param fn: filename to get timestamp from
-    :type fn: str
-    :param return_type: The return type of the timestamp. Either str or Time; default is str
-    :type return_type: str or Time
-    :return: timestamp of integration
-    :rtype: str or Time
-    """
-    base = fn.split('/')[-1] # remove the subdirectories and only look at the actual file's name
-    ts = base.split('.')[0] # the timestamp is the first element in the standard ms naming scheme
-    if return_type is str:
-        return ts
-    elif return_type is Time:
-        return Time(ts, format = 'isot')
-    return
 
 def twoD_Gaussian(xy, amplitude, xo, yo, sigma_x, sigma_y, theta, offset):
     """
@@ -113,9 +97,9 @@ def theta_to_bpa(theta):
     return bpa
 
 
-def get_beam_shape_params(dat, dpix=12, update_file_header=True, threshold=8, fwhm=8):
+def get_beam_shape_params_circ(fn, dpix=12, update_file_header=True, threshold=8, fwhm=8):
     """
-    Gets the beam shape parameters that can be used in twoD_Gaussian to construct a psf. Necessary if the data were not deconvolved. Assumes that the sources are sufficiently circular that DAOStarFinder can identify to extract-- if this doesn't work, consider using get_beam_shape_params_v2
+    Gets the beam shape parameters that can be used in twoD_Gaussian to construct a psf. Necessary if the data were not deconvolved. Assumes that the sources are sufficiently circular that DAOStarFinder can identify to extract-- if this doesn't work, consider using get_beam_shape_params_iter
     :param fn: the filename of the image to be used to derive beam shape parameters
     :type fn: str
     :param dpix: defines the shape of the array for Gaussian construction; creates array of dimension 2 x (2 * dpix)
@@ -168,9 +152,9 @@ def get_beam_shape_params(dat, dpix=12, update_file_header=True, threshold=8, fw
     return popt
 
 
-def get_beam_shape_params_v2(fn, update_file_header=True, subframe_radius = (50,50), std_threshold = 6, niter = 21, sma=15, eps=0.7, pa=2):
+def get_beam_shape_params_iter(fn, update_file_header=True, subframe_radius = (50,50), std_threshold = 6, niter = 21, sma=15, eps=0.7, pa=2):
     """
-    Gets the beam shape parameters that can be used in twoD_Gaussian to construct a psf. Necessary if the data were not deconvolved. This is slower than get_beam_shape_params, but can identify even extremely elliptical sources.
+    Gets the beam shape parameters that can be used in twoD_Gaussian to construct a psf. Necessary if the data were not deconvolved. This is slower than get_beam_shape_params_circ, but can identify even extremely elliptical sources.
     :param fn: the filename of the image to be used to derive beam shape parameters
     :type fn: str
     :param update_file_header: if True, updates the BPA, BMIN, and BMAJ values in the header of the file
@@ -231,161 +215,256 @@ def get_beam_shape_params_v2(fn, update_file_header=True, subframe_radius = (50,
     return popt
 
 
-def get_source_positions(fn, thresh_pix=3.5, thresh_isl=2, rms_box=(50,15), min_source_flux=3, fwhm=8, threshold=8, dynamic=True, method='dao'):
-    """
-    Gets the positions of sources in a FITS file either through DAOStarFinder or pybdsf. I recommend DAOStarFinder
-    :param fn: the file name of the FITS file
-    :type fn: str
-    :param thresh_pix: Only used if method is 'bdsf', in which case it sets the minimum SNR of the brightest pixel of a source island
-    :type thresh_pix: float
-    :param thresh_isl: Only used if the method is 'bdsf'
-    :type thresh_isl: float
-    :param rms_box: Only used if the method is 'bdsf'. Defines the box size that is used to estiamte the rms
-    :type rms_box: tuple length 2
-    :param min_source_flux: Only used if the method is 'bdsf'. Defines the minimum flux of a source for it to be included as a source
-    :param fwhm: Only used if the method='dao' and dynamic=False. Sets the full-width half-maximum that is used in DAOStarFinder
-    :param threshold: Only used if the method='dao'. Describes the SNR required for detecting a source. Default is 3 (3*std above the median)
-    :param dynamic: Defines whether to use a hardcoded value of fwhm (the fwhm param) or to use the FWHM as defined by BMAJ and CDELT2 in the FITS file header. If True, use the FITS header info. If the image is not deconvolved, you need to run get_beam_shape_params with update_file_header=True first. Default is True
-    :param method: defines the source-identification method; acceptable inputs are 'bdsf' and 'dao'. If bdsf is used and the file is not deconvolved, you need to run get_beam_shape_params with update_file_header=True first. Default is 'dao'
-    :return: The source positions
-    :rtype: SkyCoord or None
-    """
-    if not dynamic:
-        fwhm = fwhm
-        
-    elif dynamic:
-        try:
-            hdr = fits.open(fn)[0].header
-            if hdr['BMAJ'] !=0:
-                maj_ax = hdr['BMAJ']/hdr['CDELT2']
-                min_ax = hdr['BMIN']/hdr['CDELT2']
-                theta = hdr['BPA']
-            elif hdr['BMAJ'] == 0:
-                fwhm = fwhm
-        except:
-            fwhm = fwhm
-            
-    if method.lower() == 'bdsf':
-        result = bdsf.process_image(fn, quiet=True, thresh_pix=thresh_pix, thresh_isl=thresh_isl, rms_box=rms_box)
-        positions = np.array([src.posn_sky_centroid for src in result.sources if src.peak_flux_max > min_source_flux ])
-        source_positions = SkyCoord(positions, unit=(un.deg, un.deg))
-        
-    elif method.lower() == 'dao':
-        f = fits.open(fn)[0]
-        hdr = f.header
-        dat = f.data[0,0,:,:]
-        w = WCS(hdr, naxis=2)
-        thresh = np.median(dat) + threshold*np.std(dat)
-        
-        try:
-            # asserting ellipticity is the best, but some versions of DAOStarFinder may not support these parameters
-            daofind = DAOStarFinder(threshold=thresh, fwhm=maj_ax*2, ratio=min_ax/maj_ax, theta=theta)
-        except:
-            daofind = DAOStarFinder(fwhm=fwhm, threshold=thresh)
-            
-        sources = daofind(dat)
-        if sources is not None:
-            x = sources['xcentroid']
-            y = sources['ycentroid']
-            source_positions = w.pixel_to_world(x,y)
-            
-        elif sources is None:
-            source_positions = None
+def rms(data):
+    rms = np.sqrt(np.nanmean(data**2))
+    return rms
 
-    return source_positions
-
-
-def AccessSIMBAD(objID:str):
-    """
-    Returns SkyCoords object of the target including RA, Dec, and proper motions
-    :param objID: The name of the target object
-    :type objID: str
-    :return: The SkyCoord object with RA, Dec, and proper motions
-    :rtype: SkyCoord
-    """
-    try:
-        Simbad.add_votable_fields('main_id','propermotions')
-        simbadResult = Simbad.query_object(objID)[0]
-    except:
-        print('Unable to access the object from SIMBAD.')
+#%%
+class beam:
+    def __init__(self, bmaj:"pix", bmin:"pix", bpa:"deg"):
+        self.bmaj = bmaj
+        self.bmin = bmin
+        self.bpa = bpa
         return
     
-    try:
-        dist_val = simbadResult['Distance_distance']
-        dist_unit = un.Unit(str(simbadResult['Distance_unit']))
-        dist = dist_val*dist_unit
-        
-    except:
-        warnings.warn('Unable to determine distance of object '+objID)
-        dist = 100*un.pc
-        
-    obj_ra_str = simbadResult['RA'] 
-    obj_dec_str = simbadResult['DEC']
-    obj_ra_mu = simbadResult['PMRA'] * un.mas/un.yr
-    obj_dec_mu = simbadResult['PMDEC'] * un.mas/un.yr
-    obs_time = "J2000"
-    coord_str = obj_ra_str + ' ' + obj_dec_str
-    coords = SkyCoord(coord_str,distance = dist,frame = 'icrs', unit = (un.hourangle, un.deg), obstime = obs_time, pm_ra_cosdec = obj_ra_mu, pm_dec = obj_dec_mu)
+
+class radio_source:
+    def __init__(self, label:str, current_position:SkyCoord, persistent=None, seps=None, pos_angs=None, avg_position=None, frames=None):
+        self.label = label
+        self.persistent = persistent
+        self.seps = seps
+        self.pos_angs = pos_angs
+        self.avg_position = avg_position
+        self.current_position = current_position
+        self.frames = frames
+        return
     
-    return coords
-
-
-def ApplyProperMotion(obj:SkyCoord,obstime: Time):
-    """
-    Applies proper motion to get current position of target. SkyCoords object must include proper motion information
-    :param obj: SkyCoord object of the target to apply proper motion to. Must include proper motion information
-    :type obj: SkyCoord
-    :param obstime: Time object of the observing date for which you want to know 
-    :type obstime: Time
-    :raises Exception: Raised when it cannot apply the proper motion calculation, likely due to error in observation time or lack of proper motion information
-    :return: New coordinates of the object accounting for proper motion since J2000
-    :rtype: SkyCoord
-    """
-    try:
-        new_coordinates = obj.apply_space_motion(new_obstime = obstime)
-        return new_coordinates
-    except:
-        raise Exception('Unable to apply proper motion')
+    def update_frames(self, frame_idx:int, concat=True):
+        if self.frames is not None:
+            if concat:
+                self.frames = np.concatenate((self.frames, [frame_idx]))
+        if self.frames is None or not concat:
+            self.frames = np.array([frame_idx])
+        return
+    
+    def update_avg_position(self, avg_position:SkyCoord):
+        self.avg_position = avg_position
+        return
+    
+    def update_persistent(self, persistent:bool):
+        self.persistent = persistent
+        return
+    
+    def update_seps(self, sep, concat=True):
+        if self.seps is not None:
+            if concat:
+                self.seps = np.concatenate((self.seps, [sep]))
+        if self.seps is None or not concat:
+            self.seps = np.array([sep])
+        return
+    
+    def update_pos_angs(self, pos_ang, concat=True):
+        if self.pos_angs is not None:
+            if concat:
+                self.pos_angs = np.concatenate((self.pos_angs, [pos_ang]))
+        if self.pos_angs is None or not concat:
+            self.pos_angs = np.array([pos_ang])
+        return
+    
+    def cross_match(self, source_list, max_sep):
+        source_pos = SkyCoord([s.current_position for s in source_list])
+        cm_idx, cm_sep, __ = self.current_position.match_to_catalog_sky(source_pos)
+        if cm_sep <= max_sep:
+            return source_list[cm_idx]
         
 
-class lightcurve_extraction:
-    def __init__(self, source, full_frame_fns: list, out_dir: str, obs_time=None):
-        """
-        Class for extracting light curves for sources 
-        :param source: either the name or the SkyCoord coordinates of a source. If a name, it will try to resolve the source using AccessSimbad and the obs_time parameter. If a SkyCoord coordinate, assumes that the position is already proper motion corrected.
-        :type source: str or astropy.coordinates.SkyCoord
-        :param full_frame_fns: A list of the file names of the full-frame images
-        :type full_frame_fns: list of strings
-        :param out_dir: The directory that cropped files and solutions should be saved to
-        :type out_dir: str
-        :param obs_time: the general time of the observation. If the source given is a name, it will use this to correct the source position due to proper motion
-        :type obs_time: astropy.time.Time or str
-        """
-        
-        assert(type(source) == str or type(source) == SkyCoord)
-        self.obs_time = obs_time
-        
-        if type(obs_time) == str:
-            self.obs_time = Time(obs_time,format='isot')
+    
+class obs_frame:
+    def __init__(self, file_name, working_directory=None):
+        self.sources = []
+        self.source_positions = None
+        self.file_name = file_name
+        self.time_stamp = None
+        self.__update_frame()
+        self.__get_working_directory()
+        self.__get_beam()
+        self.cropped_filepath= None
+        self.cropped_wcs = None
+        return
+    
+    def __update_frame(self):
+        f = fits.open(self.file_name)[0]
+        self.header = f.header
+        self.data = f.data
+        self.wcs = WCS(self.header, naxis=2)
+        self.wcs._naxis = [self.wcs._naxis[0],self. wcs._naxis[1]]
+        self.timestamp = self.header['DATE-OBS']
+        f.close()
+        return 
+    
+    def __get_working_directory(self, working_directory):
+        if working_directory is not None:
+            self.working_directory = working_directory
+        elif working_directory is None:
+            self.working_directory = os.getcwd()
+            raise Warning(f"Working directory not specified, taking it to be {self.working_directory}")
+        return
+    
+    def __get_beam(self):
+        if "BMAJ" in list(self.header.keys()):
+            pix_size = self.header["CDELT2"]
+            self.beam = beam(self.header["BMAJ"]/pix_size, self.header["BMIN"]/pix_size, self.header["BPA"])
+        else:
+            try:
+                popt = get_beam_shape_params_iter(self.file_name)
+                gauss_axs = popt[3:5]
+                maj_ax = gauss_axs.max()
+                min_ax = gauss_axs.min()
+                theta = theta_to_bpa(popt[5])
+                self.beam = beam(maj_ax, min_ax, theta)
+            except:
+                Warning("Could not get beam shape parameters")
+                self.beam = None
+        return
+    
+    def crop_frame(self, center:SkyCoord, dimension: "pix" = 100, out_subdir=None, overwrite=True):
+        if out_subdir is None:
+            out_subdir = 'cropped_frames/'
+        out = os.path.join(self.working_dir, out_subdir, '')
+        if not os.path.isdir(out):
+            try:
+                os.mkdir(out)
+            except:
+                print(f"Could not make directory {out}")
+        sub_frame = Cutout2D(self.data[0,0,:,:], center, dimension, self.wcs)
+        out_name = os.path.join(out, self.file_name.split('/')[-1].replace('.fits', '_cropped.fits'))
+        fits.writeto(out_name, sub_frame.data, sub_frame.wcs.to_header(), overwrite=overwrite)
+        self.cropped_filepath = out_name
+        self.cropped_wcs = sub_frame.wcs
+        return
+
+    def get_source_positions(self, sigma_threshold=4, cropped=True, verbose=False):
+        if cropped:
+            fn = self.cropped_filepath
+            f = fits.open(fn)[0]
+            dat = f.data
+            w = self.cropped_wcs
+        elif not cropped:
+            fn = self.file_name
+            f = fits.open(fn)[0]
+            dat = f.data[0,0,:,:]
+            w = self.wcs
             
+        dao = DAOStarFinder(sigma_threshold*rms(dat) + np.nanmedian(dat), fwhm=self.beam.bmaj*2, ratio=self.beam.bmin/self.beam.bmaj, theta=self.beam.bpa)
+        sources = dao(dat)
+        if len(sources) != 0:
+            sources_clip = sources[sources['peak'] > sigma_threshold*rms(dat) + np.nanmedian(dat) ]
+            source_clip_sc = w.pixel_to_world(sources_clip['xcentroid'], sources_clip['ycentroid'])
+            self.source_positions = source_clip_sc
+        elif len(sources) == 0:
+            if verbose:
+                print(f"No sources found in {fn}")
+        return
+    
+
+    
+
+class observation:
+    def __init__(self, source, full_frame_fns, out_dir, max_sep=0.2*un.deg):
+        assert(type(source) == str or type(source) == SkyCoord)
         if type(source) == str:
             # if the source was given as a name, try to resolve in Simbad and apply proper-motion correction
             try:
                 source = AccessSIMBAD(source)
-                source = ApplyProperMotion(source, self.obs_time)
                 self.source = source
             except Exception as e:
                 raise Exception(f"Could not access {source} coordinates through SIMBAD: {e}")
-                
-        elif type(source) == SkyCoord:
-            self.source = source
         
-        self.full_frame_fns = full_frame_fns
         if os.path.isdir(out_dir):
             self.out_dir = out_dir
         elif not os.path.isdir(out_dir):
             raise Exception(f"{out_dir} is not an existing directory")
+            
+        self.full_frame_fns = full_frame_fns
+        self.__init_frames(full_frame_fns, out_dir)
         
+        self.max_sep = max_sep
+        self.sources = []
+        self.latest_idx_w_source = None
+        self.equinox = 'fk5'
+        return
+    
+    def __init_frames(self, fns, out_dir):
+        frames = []
+        for fn in fns:
+            frames.append(obs_frame(fn, out_dir))
+        self.frames = frames
+        return
+    
+    def crop_frames(self, idx:int = None, dimension=100, out_subdir=None, overwrite=True):
+        if idx is None:
+            for frame in self.frames:
+                frame.crop_frame(self.source, dimension, out_subdir, overwrite)
+        elif idx is not None:
+            self.frames[idx].crop_frame(self.source, dimension, out_subdir, overwrite)
+        return
+    
+    def find_sources(self, idx:int = None, sigma_threshold=4, cropped=True, verbose=False):
+        if idx is None:
+            for frame in self.frames:
+                frame.get_source_positions(sigma_threshold=sigma_threshold, cropped=cropped, verbose=verbose)
+        elif idx is not None:
+            self.frames[idx].get_source_positions(sigma_threshold=sigma_threshold, cropped=cropped, verbose=verbose)
+        return
+    
+    def make_reference_frame(self):
+        obs_sources = []
+        latest_idx_w_source = 0
+        while len(obs_sources) == 0:
+            if self.frames[latest_idx_w_source].source_positions is not None:
+                for j,s in enumerate(self.frames[0].source_positions):
+                    source_name = f'source_{str(j+1).zfill(3)}'
+                    source = radio_source(label=source_name, frames=np.array([latest_idx_w_source]), avg_position=s, current_position=s)
+                    obs_sources.append(source)
+                    self.frames[latest_idx_w_source].sources.append(source)
+            else:
+                latest_idx_w_source += 1
+        self.latest_idx_w_source = latest_idx_w_source
+        self.sources = obs_sources
+        return
+    
+    def crossmatch_frames(self, ref_frame:obs_frame, new_frame:obs_frame, max_sep=None):
+        if max_sep is None:
+            max_sep = self.max_sep
+            
+        if self.sources is None:
+            self.make_reference_frame()
+        
+        source_dict = {}
+        ref_sources = ref_frame.sources
+        ref_positions = SkyCoord([s.position for s in ref_sources])
+        new_positions = SkyCoord(new_frame.positions)
+        
+        ref_idxs, cm_seps, __ = new_positions.cross_match(ref_positions)
+        nearby_sources = ref_sources[ref_idxs[cm_seps<=max_sep]]
+        far_sources = ref_sources[ref_idxs[cm_seps>max_sep]]
+        
+        # need to identify sources that are cross matched to the same reference position
+        
+        
+        
+        
+        
+        return
+    
+    
+  
+                
+        
+#%%
+class lightcurve_extraction:
+    def __init__(self, source, full_frame_fns: list, out_dir: str, obs_time=None):
+
         # come from find_associated_sources():
         self.beam_shape_flux_threshold = 8
         self.fwhm = 8
@@ -394,18 +473,7 @@ class lightcurve_extraction:
         self.max_sep = 0.2
         self.source_dict = None
         
-        # come from crop_fits():
-        self.equinox = 'fk5'
-        self.crop_path = None # the path to the cropped-data directory
-        self.crop_fns = None # the names of the cropped fits files
-        self.crop_dimensions = None # the dimensions of the cropped images
-        
-        # comes from get_source_positions():
-        self.source_positions = None # array of source positions in each frames
-        self.thresh_pix = 3.5
-        self.thresh_isl = 2
-        self.rms_box = (50,15)
-        self.min_source_flux = 3
+
         
         # comes from find_persistent_sources():
         self.n_source = None
@@ -418,152 +486,7 @@ class lightcurve_extraction:
         self.star_fluxes = None
         self.times = None
         return
-    
-    def get_timestamps(self, do_return=True):
-        """
-        gets the integration timestamps for all of the files
-        :param do_return: if True, returns the times as a list in addition to updating the self.times property. Default is True
-        :param do_return: bool
-        :return: list of times
-        :rtype: list of astropy.time.Time objects
-        """
-        times = []
-        for fn in self.full_frame_fns:
-            times.append(get_timestamp(fn, return_type=Time))
-        self.times = times
-        if do_return:
-            return times
-    
-    def crop_fits(self, out_subdir:str = None, dim_pix:int = 100, save=True, overwrite=True):
-        """
-        crops all fits files with the source of interest in the center pixel.
-        :param out_subdir: the directory under out_dir that cropped files will be saved to
-        :type out_subdir: str
-        :param dim_pix: the x, y dimension of the cropped image; makes a cropped image of dimensions 2*dim_pix x 2*dim_pix. Default is 100
-        :type dim_pix: int
-        :param save: if True, it will save a new file with the cropped data and new header information. Default is True
-        :type save: bool
-        :param overwrite: For if you want to overwrite the header of cropped files of the same file name. Default is True
-        :type overwrite: bool
-        :return: None
-        """
-        # Make the subdirectory for the cropped files:
-        if out_subdir is None:
-            out_subdir = 'cropped_frames/'
-        out = os.path.join(self.out_dir, out_subdir, '')
-        if not os.path.isdir(out):
-            try:
-                os.mkdir(out)
-            except:
-                print(f"Could not make directory {out}")
-                
-        subframes = np.zeros([len(self.full_frame_fns), int(2*dim_pix), int(2*dim_pix)])
-        timestamps = []
-        for i, fn in enumerate(self.full_frame_fns):
-            try:
-                f = fits.open(fn)[0]
-                hdr = f.header
-                w = WCS(hdr, naxis = 2)
-                y, x = w.world_to_pixel(self.source)
-                x = int(np.round(x,0))
-                y = int(np.round(y,0))
-                subframe = f.data[0, 0, x-dim_pix:x+dim_pix, y-dim_pix:y+dim_pix]
-                subframes[i] = subframe
-                timestamps.append(Time(f.header['DATE-OBS'], format='isot').mjd)
-                if save:
-                    hdr['CRVAL1'] = self.source.ra.value
-                    hdr['CRVAL2'] = self.source.dec.value
-                    hdr['CRPIX1'] = dim_pix + 1
-                    hdr['CRPIX2'] = dim_pix + 1
 
-                    outn = f"{out}{fn.split('/')[-1].replace('.fits', '_cropped.fits')}"
-                    fits.writeto(outn, f.data[:, :, x-dim_pix:x+dim_pix, y-dim_pix:y+dim_pix], hdr, overwrite=overwrite)
-                    
-            except Exception as e:
-                print(f"Failed on {i}: {e}")
-                
-        crop_fns = glob.glob(f"{out}*fits")
-        crop_fns.sort()
-        self.crop_path = out
-        self.crop_fns = crop_fns
-        self.crop_dimensions = subframe.shape
-        self.times = timestamps
-        return
-    
-    def get_beam_shape_params(self, idx: int = None, dpix=12, update_file_header=True, fwhm=None, threshold=None, beam_shape_ver = "1"):
-        """
-        gets the beam shape parameters for all of the files. Necessary if the data are not deconvolved
-        :param idx: index of the cropped file of interest if the beam parameters of only one file is wanted
-        :type idx: int
-        :param dpix: value for dpix in get_beam_shape_params
-        """
-        if fwhm is None:
-            fwhm = self.fwhm
-        if threshold is None:
-            threshold = self.beam_shape_flux_threshold
-            
-        if idx is None:
-            popt_vals = np.zeros((len(self.crop_fns),7))
-            for i, fn in enumerate(self.crop_fns):
-                popt_vals[i] = get_beam_shape_params(fn, dpix, update_file_header, threshold, fwhm)
-                
-        elif idx is not None:
-            popt_vals = get_beam_shape_params(self.crop_fns[idx], dpix, update_file_header, threshold, fwhm)
-        return popt_vals
-    
-    def get_source_positions(self, idx:int = None, thresh_pix=None, thresh_isl=None, rms_box=None, min_source_flux=None, threshold=8, fwhm=8, dynamic=True, method='dao', return_res=False):
-        """
-        gets the positions of sources detectable in a given frame (if idx is specified) or in all frames if idx is not specified. These get saved to the source_positions property as a list of SkyCoord lists.
-        :param idx: indicates the index of the cropped_fn list to get source positions for. If None, it does this for all images in the cropped_fn list. Default is None
-        :type index: int
-        :param thresh_pix: Only used if the method is 'bdsf', which is not recommended
-        :type thresh_pix: int
-        :param thresh_isl: Only used if the method is 'bdsf', which is not recommended
-        :type thresh_isl: float
-        :param rms_box: Only used if the method is 'bdsf', which is not recommended
-        :type rms_box: tuple of len 2
-        :param min_source_flux: minimum flux an identified source needs to be included in the final list
-        :type min_source_flux: float
-        :param threshold: Only used if the method is 'dao'
-        :type threshold: float
-        :param fwhm: Only used if the method is 'dao' and dynamic=False
-        :type fwhm: float
-        :param dynamic: if True, then the beam shape changes based on beam parameters in the file header, otherwise it uses the fwhm parameter to define the beam shape. Default is True
-        :type dynamic: bool
-        :param method: the method to use to look for sources, either pybdsf ('bdsf') or DAOStarfinder ('dao'). Default is 'dao'
-        :type method: str
-        :param return_res: return the results in addition to assigning them to the self.source_positions property. Default is False (only assigns to self.source_positions)
-        :type return_res: bool
-        :return: If return_res=True, returns a numpy array of SkyCoord lists-- each array index is the list of sources for a frame of that same index
-        :rtype: np.ndarray
-        """
-        if thresh_pix is None:
-            thresh_pix = self.thresh_pix
-        if thresh_isl is None:
-            thresh_isl = self.thresh_isl
-        if rms_box is None:
-            rms_box = self.rms_box
-        if min_source_flux is None:
-            min_source_flux  = self.min_source_flux
-            
-        if idx is None:
-            source_positions = np.zeros(len(self.crop_fns), dtype=object)
-            for i,fn in enumerate(self.crop_fns):
-                sp = get_source_positions(fn, thresh_pix, thresh_isl, rms_box, min_source_flux, fwhm=fwhm, threshold=threshold, dynamic=dynamic, method=method)
-                if sp is not None:
-                    source_positions[i] = sp
-        
-        elif idx is not None:
-            source_positions = get_source_positions(self.crop_fns[idx], thresh_pix, thresh_isl, rms_box, min_source_flux, fwhm=fwhm, threshold=threshold, dynamic=dynamic, method=method)
-            return source_positions
-        
-        self.thresh_pix = thresh_pix
-        self.thresh_isl = thresh_isl
-        self.rms_box = rms_box
-        self.min_source_flux = min_source_flux
-        self.source_positions = source_positions 
-        if return_res:
-            return source_positions
     
     def find_associated_sources(self, source_positions=None, max_sep=None):
         """
@@ -573,32 +496,7 @@ class lightcurve_extraction:
         :param max_sep: The maximum allowable separations for a source image in two different frames to be considered associated with the same source. If None, it uses the value assigned as self.max_sep
         :type max_sep: float; units degrees
         """
-        
-        if max_sep is None:
-            max_sep = self.max_sep
-            
-        if source_positions is None:
-            if self.source_positions is None:
-                source_positions = self.get_source_positions()
-            elif self.source_positions is not None:
-                source_positions = self.source_positions
-                
-        assert(len(source_positions) == len(self.crop_fns)) # makes sure the number of source list indices matches the number of images
-        
-        source_list = {} #dictionary of all sources found across the frames
-        self.frame_source_dict['frame_000'].update({'sources':[], 'positions':[], 'separations':[],'pos_angles':[]}) # initialize first frame
-        
-        # update source information for the first frame. Note: assumes that there were sources detected in the first frame
-        for j,s in enumerate(source_positions[0]):
-                source_list.update({f'source_{str(j).zfill(2)}':[s]})
-                source_list.update({f'source_{str(j).zfill(2)}_mean_pos':s}) 
-                self.frame_source_dict['frame_000']['sources'].append(f'source_{str(j).zfill(2)}')
-                self.frame_source_dict['frame_000']['positions'].append(s)
-                self.frame_source_dict['frame_000']['separations'].append(None)
-                self.frame_source_dict['frame_000']['pos_angles'].append(None)   
-                
-        latest_idx_w_source = 0 # the most recent frame index with a source
-        
+      
         for i in range(len(source_positions)-1):
             # update the latest list of source positions
             frame_key = f'frame_{str(i).zfill(3)}'

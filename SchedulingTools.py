@@ -40,21 +40,21 @@ def AccessSIMBAD(objID:str):
         print('You need to give an object name')
     try:
         Simbad.add_votable_fields('main_id','propermotions')
-        simbadResult = Simbad.query_object(objID)[0]
+        simbadResult = Simbad.query_object(objID)
     except:
         print('Unable to access the object from SIMBAD.')
         return;
     try:
-        dist_val = simbadResult['Distance_distance']*u.pc
-        dist_unit = str(simbadResult['Distance_unit'])
-        dist = dist_val.to(dist_unit)
+        dist_val = simbadResult[0]['Distance_distance']
+        dist_unit = u.Unit(simbadResult[0]['Distance_unit'])
+        dist = dist_val*dist_unit
     except:
         warnings.warn('Unable to determine distance of object '+objID)
         dist = 100*u.pc
-    obj_ra_str = simbadResult['RA'] 
-    obj_dec_str = simbadResult['DEC']
-    obj_ra_mu = simbadResult['PMRA'] * u.mas/u.yr
-    obj_dec_mu = simbadResult['PMDEC'] * u.mas/u.yr
+    obj_ra_str = simbadResult[0]['RA'] 
+    obj_dec_str = simbadResult[0]['DEC']
+    obj_ra_mu = simbadResult[0]['PMRA'] * simbadResult['PMRA'].unit[0]
+    obj_dec_mu = simbadResult[0]['PMDEC'] * simbadResult['PMDEC'].unit[0]
     obs_time = "J2000"
     coord_str = obj_ra_str + ' ' + obj_dec_str
     coords = SkyCoord(coord_str,distance = dist,frame = 'icrs', unit = (u.hourangle, u.deg), obstime = obs_time, pm_ra_cosdec = obj_ra_mu, pm_dec = obj_dec_mu)
@@ -488,101 +488,4 @@ if __name__ == "__main__":
     obs.MakeObservingSchedule()
     obs.ConsolidateObservingSchedule()
     obs.PlotAllObjectAltitudes()
-#%%
 
-class ObservingPlan:
-    def __init__(self, observation_schedule: ObservationSchedule,flats_plan_fn,start_time:Time):
-        if len(observation_schedule.observing_table) == 0:
-            observation_schedule.MakeObservingSchedule()
-            observation_schedule.ConsolidateObservingSchedule()
-        if len(observation_schedule.observing_table) != 0 and not observation_schedule.observing_schedule:
-            observation_schedule.ConsolidateObservingSchedule()
-        self.schedule_table = observation_schedule.observing_schedule
-        self.flats_plan_fn = flats_plan_fn
-        self.start_time = start_time
-        return
-    
-    def GetTargetInfo(self,ind):
-        obj = self.schedule_table[ind]
-        name = obj['Object_Name']
-        mp = obj['Coordinates']
-        pa = obj['PA']
-        start = obj['Start_Datetime']
-        end = obj['End_Datetime']
-        filt = obj['Filter']
-        dt = int((end - start).to('s').value)
-        start = start.datetime.time().isoformat()
-        return name,mp,pa,start,dt,filt
-    
-    def WriteTargetBlock(self,ind):
-        name,mp,pa,start,dt,filt = self.GetTargetInfo(ind)
-        ra = mp.ra
-        dec = mp.dec
-        block = r';===Target '+name+' ===\r'
-        block += '#waituntil 1, '+start+'\r'
-        block += '#repeat '+str(dt)+'\r'
-        block += '#binning 1\r'+'#interval 1\r'+'#posang '+str(pa)+'\r'
-        block += '#filter '+filt+'\r'
-        block += name + '\t'+str(ra.deg)+'\t'+str(dec.deg)+'\r'
-        return block
-    
-    def WriteDarkBlock(self,frames = 10):
-        dark_start = self.start_time + 25*u.min
-        dark_start = dark_start.datetime.time().isoformat()
-        block = ';=== Target Dark ===\r'
-        block += '#waituntil 1, '+dark_start+'\r'
-        block += '#repeat 1\r'+'#count '+str(int(frames))+'\r'+'#interval 1\r'
-        block += '#binning 1\r'+'#dark\r;\r'
-        return block
-    
-    def WriteBiasBlock(self,frames = 10):
-        bias_start = self.start_time + 30*u.min
-        bias_start = bias_start.datetime.time().isoformat()
-        block = ';=== Target Bias ===\r'
-        block += '#waituntil 1, '+bias_start+'\r'
-        block += '#repeat 1\r'+'#count '+str(int(frames))+'\r'+'#interval 0\r'
-        block += '#binning 1\r'+'#bias\r;\r'
-        return block
-
-    def WriteFlatPlan(self,out_fn,flat_frames = 10):
-        filter_names = np.unique(self.schedule_table['Filter'])
-        block = ''
-        self.flat_fn = out_fn
-        for fn in filter_names:
-            block +=str(int(flat_frames))+','+fn+',1,0.00\r'
-        block+=';'
-        f = open(out_fn,'w')
-        f.write(block)
-        f.close()
-        return block
-    
-    def WritePlan(self,dark_frames = 10, bias_frames = 10,out_fn = 'test_plan.txt'):
-        preamble = '#waituntil 1, '+self.start_time.datetime.time().isoformat()+'\r'
-        preamble += '#chill -20'+'\r'
-        preamble += '#duskflats '+self.flats_plan_fn+'\r'
-        plan = preamble + self.WriteDarkBlock(dark_frames) + self.WriteBiasBlock(bias_frames)
-        for i in range(len(self.schedule_table)):
-            plan += self.WriteTargetBlock(i)
-        plan += ';\r#shutdown\r;'
-        f = open(out_fn,'w')
-        f.write(plan)
-        f.close()
-        self.plan_fn = out_fn
-        return plan
-        
-
-# #%%
-# def UpdateConfigFile(fn,name):
-#     return
-
-# def LoadConfigFile(fn):
-#     return
-
-# #%%
-# for i in obs.objects:
-#     name = i.name
-#     ra = i.coordinates[0].ra.hms
-#     dec = DecDegToTriplet(i.coordinates[0])
-#     print(name+': ')
-#     print(ra,dec)
-#     print('\n')

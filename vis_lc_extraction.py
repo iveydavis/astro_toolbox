@@ -21,6 +21,7 @@ from matplotlib import patches
 import matplotlib as mp
 import colorsys
 import aplpy
+import copy
 
 import os
 import bdsf
@@ -226,76 +227,25 @@ class beam:
         self.bmin = bmin
         self.bpa = bpa
         return
-    
-
-class radio_source:
-    def __init__(self, label:str, current_position:SkyCoord, persistent=None, seps=None, pos_angs=None, avg_position=None, frames=None):
-        self.label = label
-        self.persistent = persistent
-        self.seps = seps
-        self.pos_angs = pos_angs
-        self.avg_position = avg_position
-        self.current_position = current_position
-        self.frames = frames
-        return
-    
-    def update_frames(self, frame_idx:int, concat=True):
-        if self.frames is not None:
-            if concat:
-                self.frames = np.concatenate((self.frames, [frame_idx]))
-        if self.frames is None or not concat:
-            self.frames = np.array([frame_idx])
-        return
-    
-    def update_avg_position(self, avg_position:SkyCoord):
-        self.avg_position = avg_position
-        return
-    
-    def update_persistent(self, persistent:bool):
-        self.persistent = persistent
-        return
-    
-    def update_seps(self, sep, concat=True):
-        if self.seps is not None:
-            if concat:
-                self.seps = np.concatenate((self.seps, [sep]))
-        if self.seps is None or not concat:
-            self.seps = np.array([sep])
-        return
-    
-    def update_pos_angs(self, pos_ang, concat=True):
-        if self.pos_angs is not None:
-            if concat:
-                self.pos_angs = np.concatenate((self.pos_angs, [pos_ang]))
-        if self.pos_angs is None or not concat:
-            self.pos_angs = np.array([pos_ang])
-        return
-    
-    def cross_match(self, source_list, max_sep):
-        source_pos = SkyCoord([s.current_position for s in source_list])
-        cm_idx, cm_sep, __ = self.current_position.match_to_catalog_sky(source_pos)
-        if cm_sep <= max_sep:
-            return source_list[cm_idx]
         
-
     
 class obs_frame:
-    def __init__(self, file_name, working_directory=None):
-        self.sources = []
+    def __init__(self, file_name, index=None, working_directory=None):
         self.source_positions = None
         self.file_name = file_name
         self.time_stamp = None
         self.__update_frame()
-        self.__get_working_directory()
+        self.__get_working_directory(working_directory)
         self.__get_beam()
         self.cropped_filepath= None
         self.cropped_wcs = None
+        self.index = index
         return
     
     def __update_frame(self):
-        f = fits.open(self.file_name)[0]
-        self.header = f.header
-        self.data = f.data
+        f = fits.open(self.file_name)
+        self.header = f[0].header
+        self.data = f[0].data
         self.wcs = WCS(self.header, naxis=2)
         self.wcs._naxis = [self.wcs._naxis[0],self. wcs._naxis[1]]
         self.timestamp = self.header['DATE-OBS']
@@ -307,7 +257,7 @@ class obs_frame:
             self.working_directory = working_directory
         elif working_directory is None:
             self.working_directory = os.getcwd()
-            raise Warning(f"Working directory not specified, taking it to be {self.working_directory}")
+            warnings.warn(f"Working directory not specified, taking it to be {self.working_directory}")
         return
     
     def __get_beam(self):
@@ -330,7 +280,7 @@ class obs_frame:
     def crop_frame(self, center:SkyCoord, dimension: "pix" = 100, out_subdir=None, overwrite=True):
         if out_subdir is None:
             out_subdir = 'cropped_frames/'
-        out = os.path.join(self.working_dir, out_subdir, '')
+        out = os.path.join(self.working_directory, out_subdir, '')
         if not os.path.isdir(out):
             try:
                 os.mkdir(out)
@@ -342,20 +292,31 @@ class obs_frame:
         self.cropped_filepath = out_name
         self.cropped_wcs = sub_frame.wcs
         return
-
-    def get_source_positions(self, sigma_threshold=4, cropped=True, verbose=False):
+    
+    def __get_data_and_wcs(self, cropped):
         if cropped:
             fn = self.cropped_filepath
             f = fits.open(fn)[0]
-            dat = f.data
+            if len(f.data.shape) == 4:
+                dat = f.data[0,0,:,:]
+            else:
+                dat = f.data
             w = self.cropped_wcs
+            
         elif not cropped:
             fn = self.file_name
             f = fits.open(fn)[0]
-            dat = f.data[0,0,:,:]
+            if len(f.data.shape) == 4:
+                dat = f.data[0,0,:,:]
+            else:
+                dat = f.data
             w = self.wcs
+        return dat, w, fn
+    
+    def get_source_positions(self, sigma_threshold=4, cropped=True, verbose=False):
+        dat, w, fn = self.__get_data_and_wcs(cropped)
             
-        dao = DAOStarFinder(sigma_threshold*rms(dat) + np.nanmedian(dat), fwhm=self.beam.bmaj*2, ratio=self.beam.bmin/self.beam.bmaj, theta=self.beam.bpa)
+        dao = DAOStarFinder(threshold=sigma_threshold*rms(dat) + np.nanmedian(dat), fwhm=self.beam.bmaj*2, ratio=self.beam.bmin/self.beam.bmaj, theta=(90 + self.beam.bpa))
         sources = dao(dat)
         if len(sources) != 0:
             sources_clip = sources[sources['peak'] > sigma_threshold*rms(dat) + np.nanmedian(dat) ]
@@ -364,9 +325,27 @@ class obs_frame:
         elif len(sources) == 0:
             if verbose:
                 print(f"No sources found in {fn}")
+            self.source_positions = SkyCoord([]*un.deg, []*un.deg)
         return
     
-
+    def plot_frame(self, source_of_interest:SkyCoord = None, cropped=True, plot_sources=True, plot_source_of_interest=False):
+        dat, w,fn = self.__get_data_and_wcs(cropped)
+        fig, ax = plt.subplots(1,1)
+        ax.imshow(dat, origin = 'lower')
+        if plot_sources and self.source_positions is not None:
+            for source in self.source_positions:
+                x,y = w.world_to_pixel(source)
+                ap = EllipticalAperture([(x,y)], self.beam.bmaj, self.beam.bmin, (90 + self.beam.bpa)*un.deg)
+                ap.plot(ax=ax, color = 'r')
+        if plot_source_of_interest is True and source_of_interest is not None:
+            x,y = w.world_to_pixel(source_of_interest)
+            ap = EllipticalAperture([(x,y)], self.beam.bmaj, self.beam.bmin, (90 + self.beam.bpa)*un.deg)
+            ap.plot(ax=ax, color = 'w')
+        return
+    
+    def save(self):
+        return
+    
     
 
 class observation:
@@ -392,12 +371,13 @@ class observation:
         self.sources = []
         self.latest_idx_w_source = None
         self.equinox = 'fk5'
+        self.n_frames = len(self.full_frame_fns)
         return
     
     def __init_frames(self, fns, out_dir):
         frames = []
-        for fn in fns:
-            frames.append(obs_frame(fn, out_dir))
+        for i, fn in enumerate(fns):
+            frames.append(obs_frame(fn, i, out_dir))
         self.frames = frames
         return
     
@@ -409,53 +389,182 @@ class observation:
             self.frames[idx].crop_frame(self.source, dimension, out_subdir, overwrite)
         return
     
-    def find_sources(self, idx:int = None, sigma_threshold=4, cropped=True, verbose=False):
+    def find_sources(self, idx:int = None, sigma_threshold=4, cropped: bool = True, verbose: bool = False):
         if idx is None:
-            for frame in self.frames:
+            for i,frame in enumerate(self.frames):
+                if verbose:
+                    print(f"Frame {i+1}/{self.n_frames}")
                 frame.get_source_positions(sigma_threshold=sigma_threshold, cropped=cropped, verbose=verbose)
         elif idx is not None:
             self.frames[idx].get_source_positions(sigma_threshold=sigma_threshold, cropped=cropped, verbose=verbose)
         return
     
-    def make_reference_frame(self):
+    def start_reference_list(self):
         obs_sources = []
         latest_idx_w_source = 0
         while len(obs_sources) == 0:
             if self.frames[latest_idx_w_source].source_positions is not None:
                 for j,s in enumerate(self.frames[0].source_positions):
                     source_name = f'source_{str(j+1).zfill(3)}'
-                    source = radio_source(label=source_name, frames=np.array([latest_idx_w_source]), avg_position=s, current_position=s)
+                    positions = [SkyCoord([]*un.deg, []*un.deg, equinox=s.equinox, frame=self.equinox)]*self.n_frames
+                    positions[latest_idx_w_source] = s 
+                    source = radio_source(source_name, positions, s)
                     obs_sources.append(source)
-                    self.frames[latest_idx_w_source].sources.append(source)
             else:
                 latest_idx_w_source += 1
         self.latest_idx_w_source = latest_idx_w_source
         self.sources = obs_sources
         return
     
-    def crossmatch_frames(self, ref_frame:obs_frame, new_frame:obs_frame, max_sep=None):
+    def crossmatch(self, new_sources, max_sep: un.Quantity = None, ref_idx:int = None):
+        if max_sep is not None:
+            self.max_sep = max_sep
+        elif max_sep is None:
+            max_sep = self.max_sep
+        
+        ref_idx = self.latest_idx_w_source if ref_idx is None else ref_idx
+        new_sources = copy.deepcopy(new_sources)
+        
+        most_recent_sources = SkyCoord([s.positions[ref_idx] for s in self.sources if s.positions[ref_idx].size != 0]) # most recently identified sources; take priority for cross matching
+        most_recent_source_names = [s.label for s in self.sources if s.positions[ref_idx].size !=0] 
+        
+        all_sources = SkyCoord([s.avg_position for s in self.sources]) # average position for all previously identified sources
+        all_source_names = [s.label for s in self.sources]
+        
+        assigned_sources = {} # keeps track of which source labels have been assigned
+        
+        idx_recent, seps_recent, __ = new_sources.match_to_catalog_sky(most_recent_sources)
+        idx_recent_uniq = np.unique(idx_recent)
+        
+        # get the sources that were actually near a source in the previous frame
+        for idx in idx_recent_uniq:
+            ref_source = most_recent_sources[idx]
+            new_source_idx, new_source_sep, __ = ref_source.match_to_catalog_sky(new_sources) # the index of the new source closest to the source in the previous frame
+            if new_source_sep <= max_sep: # make sure the closest source is actually within the distance cut off
+                assigned_sources.update({f'{most_recent_source_names[idx]}': new_sources[new_source_idx]})
+                new_sources = new_sources[[i for i in range(len(new_sources)) if i != new_source_idx]] # removes the source so it doesn't get double assigned
+                
+        # go through the rest of the sources that didn't get an assignment to a source in the previous frame to see if they're near any previously-identified source
+        idx_all, seps_all, __ = new_sources.match_to_catalog_sky(all_sources)
+        idx_all_uniq = np.unique(idx_all)
+        for idx in idx_all_uniq:
+            ref_source = all_sources[idx]
+            new_source_idx, new_source_sep, __ = ref_source.match_to_catalog_sky(new_sources)
+            if new_source_sep <= max_sep:
+                assigned_sources.update({f'{all_source_names[idx]}': new_sources[new_source_idx]})
+                new_sources = new_sources[[i for i in range(len(new_sources)) if i != new_source_idx]] 
+        
+        # any sources not matched to a previously-identified source is a new source
+        latest_source_number = int(all_source_names[-1].split('_')[-1])
+        count = 1
+        for ns in new_sources:
+            assigned_sources.update({f"source_{str(latest_source_number + count).zfill(3)}":ns})
+        return assigned_sources
+    
+    def build_observation_source_list(self, max_sep=None):
         if max_sep is None:
             max_sep = self.max_sep
-            
-        if self.sources is None:
-            self.make_reference_frame()
-        
-        source_dict = {}
-        ref_sources = ref_frame.sources
-        ref_positions = SkyCoord([s.position for s in ref_sources])
-        new_positions = SkyCoord(new_frame.positions)
-        
-        ref_idxs, cm_seps, __ = new_positions.cross_match(ref_positions)
-        nearby_sources = ref_sources[ref_idxs[cm_seps<=max_sep]]
-        far_sources = ref_sources[ref_idxs[cm_seps>max_sep]]
-        
-        # need to identify sources that are cross matched to the same reference position
-        
-        
-        
-        
-        
+        for i, frame in enumerate(self.frames):
+            assigned_sources = self.crossmatch(frame.source_positions)
+            if len(assigned_sources) != 0:
+                source_list = [s.label for s in self.sources]
+                self.latest_idx_w_source = i
+                for key in list(assigned_sources.keys()):
+                    if key in source_list:
+                        source_idx = source_list.index(key)
+                        self.sources[source_idx].positions[i] = assigned_sources[key]
+                        sc = SkyCoord(self.sources[source_idx].positions)
+                        self.sources[source_idx].avg_position = SkyCoord(sc.ra.mean(), sc.dec.mean(), equinox=assigned_sources[key].equinox, frame=self.equinox)
+                    elif key not in source_list:
+                        positions = [SkyCoord([]*un.deg, []*un.deg, equinox=assigned_sources[key].equinox, frame=self.equinox)]*self.n_frames
+                        positions[i] = assigned_sources[key]
+                        source = radio_source(key, positions, assigned_sources[key])
+                        self.sources.append(source)
         return
+    
+    
+
+class radio_source:
+    def __init__(self, label:str, positions = None, avg_position=None, seps = None, pos_angs=None):
+        self.label = label
+        self.positions = positions
+        self.seps = seps
+        self.pos_angs = pos_angs
+        self.avg_position = avg_position
+        return
+    
+    def update_avg_position(self, avg_position:SkyCoord):
+        self.avg_position = avg_position
+        return
+    
+    def update_persistent(self, persistent:bool):
+        self.persistent = persistent
+        return
+    
+    def update_seps(self, sep, concat=True):
+        if self.seps is not None:
+            if concat:
+                self.seps = np.concatenate((self.seps, [sep]))
+        if self.seps is None or not concat:
+            self.seps = np.array([sep])
+        return
+    
+    def update_pos_angs(self, pos_ang, concat=True):
+        if self.pos_angs is not None:
+            if concat:
+                self.pos_angs = np.concatenate((self.pos_angs, [pos_ang]))
+        if self.pos_angs is None or not concat:
+            self.pos_angs = np.array([pos_ang])
+        return
+        
+    def save(self):
+        return
+        
+    # def crossmatch_frames(self, ref_frame:obs_frame, new_frame:obs_frame, max_sep=None):
+    #     if max_sep is None:
+    #         max_sep = self.max_sep
+            
+    #     if self.sources is None:
+    #         self.make_reference_frame()
+        
+    #     all_known_sources = self.sources
+    #     all_known_source_pos = SkyCoord([s.avg_position for s in all_known_sources])
+    #     all_known_source_names = [s.label for s in all_known_sources]
+        
+    #     ref_sources = ref_frame.sources
+    #     ref_positions = SkyCoord([s.position for s in ref_sources]) #only want to use reference sources that have a source label assignment
+        
+    #     new_positions = SkyCoord(new_frame.positions)
+        
+    #     ref_idxs, cm_seps, __ = new_positions.cross_match(ref_positions)
+    #     ref_idxs_uniq = np.unique(ref_idxs)[0] # don't want to replicate searches of ref_idxs
+    #     far_sources = new_positions[cm_seps>max_sep] # source positions for sources that were not near any reference sources
+    #     near_sources = new_positions[cm_seps <= max_sep]
+        
+    #     identified_source_names = []
+    #     # for each reference source that got a crossmatch, find the closest new source that had small separations
+    #     for ri in ref_idxs_uniq:
+    #         ref_source = ref_sources[ri] 
+    #         seps = ref_source.position.separation(near_sources)
+    #         if seps.min() < max_sep:
+    #             source_position = near_sources[seps == seps.min()] # the closest source position to the reference source
+    #             source_name = ref_source.label
+    #             avg_position = SkyCoord([ref_source.avg_position, source_position])
+    #             avg_position_update = SkyCoord(avg_position.ra.mean(), avg_position.dec.mean())
+    #             rs = radio_source(source_name, source_position, avg_position=avg_position_update)
+    #             new_frame.sources.append(rs) # update source list for the frame
+    #             idx = all_known_source_names.index(source_name)
+    #             all_known_sources[idx] = rs
+    #             identified_source_names.append(source_name)
+                
+        
+    #     # for new sources that were far away, check if they are near the average position of any previously-found sources    
+    #     for source in far_sources:
+    #         cm_all, cm_all_seps, __ = source.match_to_catalog_sky(all_known_source_pos) # gets the closest source that is near
+            
+        
+        
+    #     return new_frame, all_known_source_names
     
     
   
@@ -487,132 +596,6 @@ class lightcurve_extraction:
         self.times = None
         return
 
-    
-    def find_associated_sources(self, source_positions=None, max_sep=None):
-        """
-        Figures out which sources in the self.source_positions property are associated with sources in other frames. Sources are assigned names based on their associations and are specified in the frame_source_dict property.
-        :param source_positions: A list of source positions for each of the frames. If None, then it uses the self.source_positions properties. If self.get_source_positions hasn't been run yet, then it runs it with default parameters.
-        :type source_positions: np.ndarray of SkyCoord
-        :param max_sep: The maximum allowable separations for a source image in two different frames to be considered associated with the same source. If None, it uses the value assigned as self.max_sep
-        :type max_sep: float; units degrees
-        """
-      
-        for i in range(len(source_positions)-1):
-            # update the latest list of source positions
-            frame_key = f'frame_{str(i).zfill(3)}'
-            sources = []
-            for k in source_list.keys():
-                if 'mean_pos' in k:
-                    sources.append(source_list[k])
-            sources = SkyCoord(sources)
-
-            # before finding sources in the new frame, make sure to only use "actual" sources from the previous frame for reference
-            if type(self.source_positions[i]) == SkyCoord:
-                latest_idx_w_source = i
-                
-            ref_key = f'frame_{str(latest_idx_w_source).zfill(3)}'
-            ref = self.frame_source_dict[ref_key]['positions']
-            ref = SkyCoord(ref)
-            
-            chk = source_positions[i+1]
-            
-            # if there were NO sources found in the i+1 frame
-            if type(chk) != SkyCoord:
-                new_frame_key = f'frame_{str(i+1).zfill(3)}'
-                self.frame_source_dict[new_frame_key].update({'sources':[], 'positions':[], 'separations':[],'pos_angles':[]})
-                
-            # if there were sources found in the i+1 frame to be cross-matched with the reference frame:
-            elif type(chk) == SkyCoord:
-                cm_idxs, seps, __ = chk.match_to_catalog_sky(ref)
-                bad_idxs = np.where(seps > max_sep*un.deg)[0]
-
-                # check if the far away sources are associated with sources not seen in the previous frame. if not, make a new source item
-                s = {} # source dictionary for the i+1 frame
-                for idx in bad_idxs:
-                    s_far = chk[idx]
-                    new_idx, new_sep, __ = s_far.match_to_catalog_sky(sources) # cross-matching source with mean position of all sources found so far
-                    count = 0
-                    
-                    # if the source is near the mean position of a previously-found source, then it qualifies as that source
-                    if new_sep <= max_sep*un.deg:
-                        key_name = f'source_{str(new_idx).zfill(2)}'
-                        s.update({key_name:[s_far]})
-                    
-                    # if the source is not near the mean position of any previously-found sources, then it is considered a new source
-                    elif new_sep > max_sep*un.deg:
-                        key_name = f'source_{str(int(len(sources)+count)).zfill(2)}' #new source name
-                        s.update({key_name:[s_far]}) # assign source position to new dictonary item
-                        count += 1
-
-                # now check for the sources that got cross matched in the previous image
-                cm_idxs = np.delete(cm_idxs, bad_idxs)
-                seps = np.delete(seps, bad_idxs)
-                chk = np.delete(chk, bad_idxs)
-                for idxi, idx in enumerate(cm_idxs):
-                    # for sources that were cross-matched with a source from the reference frame, make a new dictionary item for it
-                    if self.frame_source_dict[ref_key]['sources'][idx] not in list(s.keys()):
-                        s.update({self.frame_source_dict[ref_key]['sources'][idx]:[]})
-#                     s[self.frame_source_dict[ref_key]['sources'][idx]] += {chk[idxi]}
-                    s[self.frame_source_dict[ref_key]['sources'][idx]].append(chk[idxi])
-
-                # get rid of duplicate cross matches
-                for k in list(s.keys()):
-                    if len(s[k])>1:
-                        seps = source_list[f'{k}_mean_pos'].separation(SkyCoord(s[k]))
-                        min_idx = np.where(seps == np.min(seps))[0][0]
-                        s[k] = [s[k][min_idx]]
-
-                # update source dictionary and assignment list
-                sa = []
-                new_frame_key = f'frame_{str(i+1).zfill(3)}'
-                self.frame_source_dict[new_frame_key].update({'sources':[], 'positions':[], 'separations':[],'pos_angles':[]})
-                for key in list(s.keys()):
-                    sa.append(key)
-                    if key not in source_list:
-                        source_list.update({key:[]})
-                    source_list[key].append(s[key][0])
-                    poss = SkyCoord(source_list[key])
-                    source_list[f'{key}_mean_pos'] = SkyCoord(poss.ra.mean(), poss.dec.mean(), frame = self.equinox) 
-                    self.frame_source_dict[new_frame_key]['sources'].append(key)
-                    self.frame_source_dict[new_frame_key]['positions'].append(s[key][0])
-                    self.frame_source_dict[new_frame_key]['separations'].append(None)
-                    self.frame_source_dict[new_frame_key]['pos_angles'].append(None)
-            
-        self.max_sep = max_sep
-        self.source_dict = source_list
-        return
-    
-    def find_persistent_sources(self, n_source:int = None):
-        """
-        Identifies which sources show up most persistently. Updates the self.persistent_sources property
-        :param n_source: The number of persistent sources in the FOV. If None, then n_source is the median number of sources identified. Default is None
-        :type n_source: int
-        """
-        
-        if self.source_dict is None:
-            raise warnings.warn("Source dictionary hasn't been produced yet. Running find_associated_sources first.")
-        
-        if n_source is None:
-            n_sources = [len(self.source_positions[i]) for i in range(len(self.crop_fns)) if type(self.source_positions[i]) == SkyCoord]
-            n_source = int(np.median(n_sources))
-        self.n_source = n_source
-        
-        source_list_lens = []
-        keys = []
-        for key in list(self.source_dict.keys()):
-            if 'mean_pos' not in key:
-                source_list_lens.append(len(self.source_dict[key]))
-                keys.append(key)
-
-        source_list_lens, keys = zip(*sorted(zip(source_list_lens, keys), reverse=True)) # sort sources by the number of times they were identified
-        keys_final = keys[:n_source]
-        
-        persistent_sources = {}
-        for key in keys_final:
-            persistent_sources.update({key:self.source_dict[f'{key}_mean_pos']})
-        
-        self.persistent_sources = persistent_sources
-        return
     
     def find_separation_and_pos_angs(self):
         """

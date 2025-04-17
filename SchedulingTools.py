@@ -53,8 +53,8 @@ def AccessSIMBAD(objID:str):
         dist = 100*u.pc
     obj_ra_str = simbadResult[0]['RA'] 
     obj_dec_str = simbadResult[0]['DEC']
-    obj_ra_mu = simbadResult[0]['PMRA'] * simbadResult['PMRA'].unit[0]
-    obj_dec_mu = simbadResult[0]['PMDEC'] * simbadResult['PMDEC'].unit[0]
+    obj_ra_mu = simbadResult[0]['PMRA'] * simbadResult['PMRA'].unit
+    obj_dec_mu = simbadResult[0]['PMDEC'] * simbadResult['PMDEC'].unit
     obs_time = "J2000"
     coord_str = obj_ra_str + ' ' + obj_dec_str
     coords = SkyCoord(coord_str,distance = dist,frame = 'icrs', unit = (u.hourangle, u.deg), obstime = obs_time, pm_ra_cosdec = obj_ra_mu, pm_dec = obj_dec_mu)

@@ -244,7 +244,6 @@ class obs_frame:
     def __update_frame(self):
         f = fits.open(self.file_name)
         self.header = f[0].header
-        self.data = f[0].data
         self.wcs = WCS(self.header, naxis=2)
         self.wcs._naxis = [self.wcs._naxis[0],self. wcs._naxis[1]]
         self.timestamp = self.header['DATE-OBS']
@@ -285,7 +284,8 @@ class obs_frame:
                 os.mkdir(out)
             except:
                 print(f"Could not make directory {out}")
-        sub_frame = Cutout2D(self.data[0,0,:,:], center, dimension, self.wcs)
+        data = fits.open(self.file_name)[0].data[0,0,:,:]
+        sub_frame = Cutout2D(data, center, dimension, self.wcs)
         out_name = os.path.join(out, self.file_name.split('/')[-1].replace('.fits', '_cropped.fits'))
         fits.writeto(out_name, sub_frame.data, sub_frame.wcs.to_header(), overwrite=overwrite)
         self.cropped_filepath = out_name
@@ -403,8 +403,11 @@ class observation:
                 self.source = source
             except Exception as e:
                 raise Exception(f"Could not access {source} coordinates through SIMBAD: {e}")
+        elif type(source) == SkyCoord:
+            self.source = source
+            
         if obstime is not None:
-            source = ApplyProperMotion(source, obstime)
+            self.source = ApplyProperMotion(self.source, obstime)
         
         if os.path.isdir(out_dir):
             self.out_dir = out_dir
@@ -415,11 +418,16 @@ class observation:
         self.__init_frames(full_frame_fns, out_dir)
         
         self.max_sep = max_sep
-        self.sources = []
-        self.source_fluxes = np.array([])
+        
+        self.detected_sources = []
+        self.detected_source_fluxes = np.array([])
+        
         self.latest_idx_w_source = None
         self.equinox = 'fk5'
         self.n_frames = len(self.full_frame_fns)
+        
+        self.source_positions = np.array([]) # for the actual source of interest; not sources detected in the frames
+        self.source_fluxes = np.array([])
         return
     
     def __init_frames(self, fns, out_dir):
@@ -427,6 +435,7 @@ class observation:
         for i, fn in enumerate(fns):
             frames.append(obs_frame(fn, i, out_dir))
         self.frames = frames
+        self.timestamps = [Time(frame.timestamp) for frame in self.frames]
         return
     
     def crop_frames(self, idx:int = None, dimension=100, out_subdir=None, overwrite=True):
@@ -461,7 +470,7 @@ class observation:
             else:
                 latest_idx_w_source += 1
         self.latest_idx_w_source = latest_idx_w_source
-        self.sources = obs_sources
+        self.detected_sources = obs_sources
         return
     
     def crossmatch(self, new_sources, max_sep: un.Quantity = None, ref_idx:int = None):
@@ -473,11 +482,11 @@ class observation:
         ref_idx = self.latest_idx_w_source if ref_idx is None else ref_idx
         new_sources = copy.deepcopy(new_sources)
         
-        most_recent_sources = SkyCoord([s.positions[ref_idx] for s in self.sources if s.positions[ref_idx].size != 0]) # most recently identified sources; take priority for cross matching
-        most_recent_source_names = [s.label for s in self.sources if s.positions[ref_idx].size !=0] 
+        most_recent_sources = SkyCoord([s.positions[ref_idx] for s in self.detected_sources if s.positions[ref_idx].size != 0]) # most recently identified sources; take priority for cross matching
+        most_recent_source_names = [s.label for s in self.detected_sources if s.positions[ref_idx].size !=0] 
         
-        all_sources = SkyCoord([s.avg_position for s in self.sources]) # average position for all previously identified sources
-        all_source_names = [s.label for s in self.sources]
+        all_sources = SkyCoord([s.avg_position for s in self.detected_sources]) # average position for all previously identified sources
+        all_source_names = [s.label for s in self.detected_sources]
         
         assigned_sources = {} # keeps track of which source labels have been assigned
         
@@ -517,33 +526,33 @@ class observation:
             assigned_sources = self.crossmatch(frame.source_positions, max_sep)
             
             if len(assigned_sources) != 0:
-                source_list = [s.label for s in self.sources]
+                source_list = [s.label for s in self.detected_sources]
                 self.latest_idx_w_source = i
                 
                 for key in list(assigned_sources.keys()):
                     if key in source_list:
                         source_idx = source_list.index(key)
-                        count = self.sources[source_idx].frame_count
-                        self.sources[source_idx].positions[i] = assigned_sources[key]
-                        avg_orig = self.sources[source_idx].avg_position
+                        count = self.detected_sources[source_idx].frame_count
+                        self.detected_sources[source_idx].positions[i] = assigned_sources[key]
+                        avg_orig = self.detected_sources[source_idx].avg_position
                         ra_weight, dec_weight = (avg_orig.ra*count, avg_orig.dec*count)   
                         ra_new = (ra_weight + assigned_sources[key].ra)/(count+1)
                         dec_new = (dec_weight + assigned_sources[key].dec)/(count+1)
-                        # sc = SkyCoord(self.sources[source_idx][:i+1].positions) # too slow
-                        self.sources[source_idx].avg_position = SkyCoord(ra_new, dec_new, equinox=assigned_sources[key].equinox, frame=self.equinox)
-                        self.sources[source_idx].frame_count += 1
+                        # sc = SkyCoord(self.detected_sources[source_idx][:i+1].positions) # too slow
+                        self.detected_sources[source_idx].avg_position = SkyCoord(ra_new, dec_new, equinox=assigned_sources[key].equinox, frame=self.equinox)
+                        self.detected_sources[source_idx].frame_count += 1
                         
                     elif key not in source_list:
                         positions = [SkyCoord([]*un.deg, []*un.deg, equinox=assigned_sources[key].equinox, frame=self.equinox)]*self.n_frames
                         positions[i] = assigned_sources[key]
                         source = radio_source(key, positions, assigned_sources[key])
                         source.frame_count += 1
-                        self.sources.append(source)
+                        self.detected_sources.append(source)
         return
     
     def calc_space_changes(self):
-        for i, source in enumerate(self.sources):
-            self.sources[i].calc_space_change()
+        for i, source in enumerate(self.detected_sources):
+            self.detected_sources[i].calc_space_change()
         return
     
     def get_fluxes_single_frame(self, frame_idx:int, get_bkg=False, cropped=True):
@@ -552,7 +561,7 @@ class observation:
         if get_bkg:
             frame.get_background_stats(cropped)
         
-        positions = [s.positions[frame_idx] for s in self.sources]
+        positions = [s.positions[frame_idx] for s in self.detected_sources]
         fluxes = frame.get_source_fluxes(cropped, positions)
         
         return fluxes
@@ -560,13 +569,89 @@ class observation:
     
     def get_fluxes_all_frames(self, get_bkg=False, cropped=True):
         """
-        Gets fluxes for all persistent_sources across all frames
+        Gets fluxes for all sources across all frames
         """
-        fluxes = np.zeros((self.n_frames, len(self.sources)))
+        fluxes = np.zeros((self.n_frames, len(self.detected_sources)))
         for i, frame in enumerate(self.frames):
             fluxes[i] = self.get_fluxes_single_frame(i, get_bkg, cropped)
-        self.source_fluxes = fluxes    
+            
+        for i, s in enumerate(self.detected_sources):
+            s.fluxes = fluxes.transpose()[i]
+        self.detected_source_fluxes = fluxes    
         return 
+    
+    def find_weighted_position_change(self, frame_idx:int = None):
+        pi2 = np.pi/2 * un.rad
+        source_star_separations = []
+        position_vectors = []
+
+        for source in self.detected_sources:
+            if source.seps is None:
+                source.calc_space_change()
+            if source.positions[frame_idx].size != 0:    
+                mag = source.seps[frame_idx].to('arcmin').value
+                ang = -source.pos_angs[frame_idx] + 5*pi2
+                
+                position_vectors.append([mag*np.cos(ang), mag*np.sin(ang)])
+                source_star_separations.append(self.source.separation(source.avg_position).to('arcmin').value)
+                
+        if len(source_star_separations) != 0:
+            # I think this is wrong; normalizing the weights keeps the source position from changing as much as it should.
+            source_star_separations = np.array(source_star_separations)
+            weights = source_star_separations.sum()/source_star_separations
+            weights_norm = weights/np.sum(weights**2)**0.5
+
+            vecs_weight = (np.array(position_vectors).transpose()*weights_norm).transpose()
+            vecs_sum = vecs_weight.mean(axis=0)
+            sep = (vecs_sum**2).sum()**0.5
+            theta = np.arctan(vecs_sum[1]/vecs_sum[0])*un.rad
+            if theta < 0:
+                theta += 2*np.pi*un.rad
+            theta = -theta + 5*pi2
+        elif len(source_star_separations) == 0:
+            warnings.warn(f"No sources found in the field to estimate position offset for frame {frame_idx}")
+            sep = 0
+            theta = 0*un.rad
+        return sep*un.arcmin, theta
+    
+    def get_star_position(self, frame_idx):
+        """
+        Gets the new position of the star/coordinate based on weighted position change found for a given frame
+        :param frame_key: the key for the frame in frame_source_dict to get the new star/coordinate position
+        :type frame_key: str
+        :return fixed_coord: new coordinate of the star/coordinate
+        :rtype fixed_coord: astropy.coordinates.SkyCoord
+        """
+        sep, theta = self.find_weighted_position_change(frame_idx=frame_idx)
+        fixed_coord = self.source.directional_offset_by(theta, sep)
+        return fixed_coord
+    
+    def get_all_star_positions(self):
+        """
+        Gets the position of the star for all frames and update self.source_positions.
+        """
+        positions = []
+        for i in range(self.n_frames):
+            fixed_coord = self.get_star_position(i)
+            positions.append(fixed_coord)
+        self.source_positions = SkyCoord(positions)
+        return
+    
+    def get_star_fluxes(self, cropped=True):
+        if self.source_positions is None:
+            print("Finding corrected star/coordinate positions first")
+            self.get_all_star_positions()
+            
+        pix_flux = np.zeros(self.n_frames)
+        for i in range(self.n_frames):
+            dat, w, fn = self.frames[i].get_data_and_wcs(cropped)
+            
+            x,y = w.world_to_pixel(self.source_positions[i])
+            x = int(np.round(x))
+            y = int(np.round(y))
+            pix_flux[i] = dat[y,x]
+        self.source_fluxes = pix_flux
+        return
     
 
 class radio_source:
@@ -596,28 +681,32 @@ class radio_source:
         if return_vals:
             return separations, pos_angles
         return
-
         
-    def save(self):
+    def save(self, outn=None):
+        if outn is None:
+            outn = os.path.join(self.out_dir,'')
+            outn = f"{outn}lightcurve_extraction_class_data.npz"
+        np.savez(outn, self.__dict__)
         return
         
-
+def load_observation(fp):
+    """
+    loads in a lightcurve_extraction
+    :param fp: the filepath and name of the file resulting from lightcurve_extraction.save_data
+    :type fp: str
+    """
+    d = np.load(fp, allow_pickle=True)['arr_0'].flatten()[0]
+    lc_ext = lightcurve_extraction(source=d['source'], full_frame_fns=d['full_frame_fns'], out_dir=d['out_dir'], obs_time=d['obs_time'])
+    for k in d.keys():
+        lc_ext.__dict__[k] = d[k]
+    return lc_ext
                 
         
 #%%
 class lightcurve_extraction:
     def __init__(self, source, full_frame_fns: list, out_dir: str, obs_time=None):
 
-        
-        # comes from get_star_positions
-        self.star_positions = None
-        
-        # comes from get_star_fluxes
-        self.star_fluxes = None
-        self.times = None
-        
         return
-    
     
     
     def make_position_change_map(self, frame_idx, delta_ra=0.25*un.deg, delta_dec=0.25*un.deg, n_steps=1, n_iter=3, n_avg=3, plot=True, cmap='hsv'):
@@ -713,155 +802,4 @@ class lightcurve_extraction:
             return grid_seps, grid_pos_angles, fig, ax 
         return grid_seps, grid_pos_angles
     
-    def find_weighted_position_change(self, frame_key:str = None, frame_idx:int = None):
-        """
-        Gets the weighted position *change* of the star of interest given its astronomical position separation from the persistently-detected sources.
-        :param frame_key: the key for the frame in frame_source_dict to get the weighted position change
-        :type frame_key: str
-        :param frame_idx: alternative to frame_key-- the index for the frame in frame_source_dict to get the weighted position change
-        :type frame_idx: int
-        :return: sep, theta-- the separation and position angle between assigned coordinate and where its changed to
-        :rtype: float*astropy.Unit.deg, float*astropy.Unit.rad
-        """
-        assert((frame_key != None) or (frame_idx != None)), "Either frame_key or frame_idx needs to be defined"
-        if frame_key is not None:
-            assert(frame_key in self.frame_source_dict.keys()), f"Frame key {frame_key} not recognized"
-            frame_idx = int(frame_key.split("_")[-1]) 
-        elif frame_idx is not None:
-            frame_key = f"frame_{str(frame_idx).zfill(3)}"
-        
-        pi2 = np.pi/2 * un.rad
-        source_star_separations = []
-        position_vectors = []
-        frame = self.frame_source_dict[frame_key]
-        
-        for k in self.persistent_sources.keys():
-            if k in frame['sources']:
-                idx = frame['sources'].index(k)
-                pos = frame['positions'][idx]
-                ppos = self.persistent_sources[k]
-                
-                mag = ppos.separation(pos).value
-                ang = -ppos.position_angle(pos) + 5*pi2
-                
-                position_vectors.append([mag*np.cos(ang), mag*np.sin(ang)])
-                source_star_separations.append(ppos.separation(self.source).value)
-                
-        if len(source_star_separations) != 0:
-            source_star_separations = np.array(source_star_separations)
-            weights = source_star_separations.sum()/source_star_separations
-            weights_norm = weights/np.sum(weights**2)**0.5
-
-            vecs_weight = (np.array(position_vectors).transpose()*weights_norm).transpose()
-            vecs_sum = vecs_weight.mean(axis=0)
-            sep = (vecs_sum**2).sum()**0.5
-            theta = np.arctan(vecs_sum[1]/vecs_sum[0])*un.rad
-            if theta < 0:
-                theta += 2*np.pi*un.rad
-            theta = -theta + 5*pi2
-        elif len(source_star_separations) == 0:
-            warnings.warn(f"No sources found in the field to estimate position offset for frame {frame_key}")
-            sep = 0
-            theta = 0*un.rad
-        return sep*un.deg, theta
-    
-    def get_star_position(self, frame_key):
-        """
-        Gets the new position of the star/coordinate based on weighted position change found for a given frame
-        :param frame_key: the key for the frame in frame_source_dict to get the new star/coordinate position
-        :type frame_key: str
-        :return fixed_coord: new coordinate of the star/coordinate
-        :rtype fixed_coord: astropy.coordinates.SkyCoord
-        """
-        sep, theta = self.find_weighted_position_change(frame_key=frame_key)
-        fixed_coord = self.source.directional_offset_by(theta, sep)
-        return fixed_coord
-    
-    def get_star_positions(self):
-        """
-        Gets the position of the star for all frames and update self.star_positions.
-        """
-        fks = self.frame_source_dict.keys()
-        positions = []
-        for k in fks:
-            fixed_coord = self.get_star_position(frame_key=k)
-            positions.append(fixed_coord)
-        self.star_positions = SkyCoord(positions)
-        return
-    
-    def get_star_fluxes(self):
-        if self.star_positions is None:
-            print("Finding star positions first")
-            self.get_star_positions()
-            
-        pix_flux = np.zeros(len(self.crop_fns))
-        for i, fn in enumerate(self.crop_fns):
-            f = fits.open(fn)[0]
-            hdr = f.header
-            dat = f.data[0,0,:,:]
-            w = WCS(hdr, naxis = 2)
-            
-            x,y = w.world_to_pixel(self.star_positions[i])
-            x = int(np.round(x))
-            y = int(np.round(y))
-            pix_flux[i] = dat[y,x]
-        self.star_fluxes = pix_flux
-        return
-    
-    def save_data(self, outn=None):
-        if outn is None:
-            outn = os.path.join(self.out_dir,'')
-            outn = f"{outn}lightcurve_extraction_class_data.npz"
-        np.savez(outn, self.__dict__)
-        return
-    
-def load_data(fp):
-    """
-    loads in a lightcurve_extraction
-    :param fp: the filepath and name of the file resulting from lightcurve_extraction.save_data
-    :type fp: str
-    """
-    d = np.load(fp, allow_pickle=True)['arr_0'].flatten()[0]
-    lc_ext = lightcurve_extraction(source=d['source'], full_frame_fns=d['full_frame_fns'], out_dir=d['out_dir'], obs_time=d['obs_time'])
-    for k in d.keys():
-        lc_ext.__dict__[k] = d[k]
-    return lc_ext
-
-
-#     def return_source_fluxes(self, source_key):
-#         maxvs = np.zeros(len(self.frame_source_dict.keys()))
-#         minvs = np.zeros(len(self.frame_source_dict.keys()))
-#         means = np.zeros(len(self.frame_source_dict.keys()))
-#         medians = np.zeros(len(self.frame_source_dict.keys()))
-#         stds = np.zeros(len(self.frame_source_dict.keys()))
-#         for i,k in enumerate(list(self.frame_source_dict.keys())):
-#             f = fits.open(self.crop_fns[i])[0]
-#             data = f.data[0,0,:,:]
-#             hdr = f.header
-#             w = WCS(hdr, naxis=2)
-#             try:
-#                 a = hdr['BMAJ']/hdr['CDELT2']
-#                 b = hdr['BMIN']/hdr['CDELT2']
-#                 theta = np.pi/2 + hdr['BPA']*un.deg.to('rad')
-#             except:
-#                 print("Could not get beam parameters. Using circular aperture instead")
-#                 a = self.fwhm
-#                 b = self.fwhm
-#                 theta = 0
-#             try:
-#                 idx = self.frame_source_dict[f'frame_{str(i).zfill(3)}']['sources'].index(source_key)
-#                 ap = EllipticalAperture(w.world_to_pixel(self.frame_source_dict[f'frame_{str(i).zfill(3)}']['positions'][idx]),a,b,theta=theta)
-#                 m = ap.to_mask()
-#                 dm = m.multiply(data)
-#                 maxvs[i] = np.nanmax(dm)
-#                 minvs[i] = np.nanmin(dm)
-#                 medians[i] = np.nanmedian(dm)
-#                 means[i] = np.nanmean(dm)
-#                 stds[i] = np.nanstd(dm)
-#             except:
-#                 print(f"Could not get flux for source {source_key} on frame {k}")
-            
-#         return maxvs, minvs, medians, means, stds
-        
-            
             

@@ -1,33 +1,24 @@
 import numpy as np
-import pandas as pd
 import scipy.optimize as opt
 from scipy.ndimage.filters import uniform_filter
 
 from astropy.io import fits
-from astropy import constants as const, units as un
+from astropy import units as un
 from astropy.time import Time
 from astropy.wcs import WCS
 from astropy.nddata import Cutout2D
 from astropy.coordinates import SkyCoord
 
-from photutils.aperture import CircularAperture, aperture_photometry
 from photutils import DAOStarFinder, EllipticalAperture
 from SchedulingTools import AccessSIMBAD, ApplyProperMotion
 
 import matplotlib.pyplot as plt
-import palettable
 import matplotlib.colors as mc
 from matplotlib import patches
 import matplotlib as mp
 import colorsys
-import aplpy
-import copy
 
 import os
-import bdsf
-import sys
-import glob
-from PIL import Image
 import warnings
 import copy
 
@@ -233,7 +224,7 @@ class obs_frame:
     def __init__(self, file_name, index=None, working_directory=None):
         self.source_positions = None
         self.file_name = file_name
-        self.time_stamp = None
+        self.timestamp = None
         self.__update_frame()
         self.__get_working_directory(working_directory)
         self.__get_beam()
@@ -341,15 +332,14 @@ class obs_frame:
             x,y = w.world_to_pixel(source_of_interest)
             ap = EllipticalAperture([(x,y)], self.beam.bmaj, self.beam.bmin, (90 + self.beam.bpa)*un.deg)
             ap.plot(ax=ax, color = 'w')
-        return
+        return fig, ax
     
     def save(self):
-        return
-    
+        return    
     
 
 class observation:
-    def __init__(self, source, full_frame_fns, out_dir, max_sep=0.2*un.deg):
+    def __init__(self, source, full_frame_fns, out_dir, max_sep=0.2*un.deg, obstime: Time = None):
         assert(type(source) == str or type(source) == SkyCoord)
         if type(source) == str:
             # if the source was given as a name, try to resolve in Simbad and apply proper-motion correction
@@ -358,6 +348,8 @@ class observation:
                 self.source = source
             except Exception as e:
                 raise Exception(f"Could not access {source} coordinates through SIMBAD: {e}")
+        if obstime is not None:
+            source = ApplyProperMotion(source, obstime)
         
         if os.path.isdir(out_dir):
             self.out_dir = out_dir
@@ -464,25 +456,42 @@ class observation:
     def build_observation_source_list(self, max_sep=None):
         if max_sep is None:
             max_sep = self.max_sep
+            
         for i, frame in enumerate(self.frames):
-            assigned_sources = self.crossmatch(frame.source_positions)
+            assigned_sources = self.crossmatch(frame.source_positions, max_sep)
+            
             if len(assigned_sources) != 0:
                 source_list = [s.label for s in self.sources]
                 self.latest_idx_w_source = i
+                
                 for key in list(assigned_sources.keys()):
                     if key in source_list:
                         source_idx = source_list.index(key)
+                        count = self.sources[source_idx].frame_count
                         self.sources[source_idx].positions[i] = assigned_sources[key]
-                        sc = SkyCoord(self.sources[source_idx].positions)
-                        self.sources[source_idx].avg_position = SkyCoord(sc.ra.mean(), sc.dec.mean(), equinox=assigned_sources[key].equinox, frame=self.equinox)
+                        avg_orig = self.sources[source_idx].avg_position
+                        ra_weight, dec_weight = (avg_orig.ra*count, avg_orig.dec*count)   
+                        ra_new = (ra_weight + assigned_sources[key].ra)/(count+1)
+                        dec_new = (dec_weight + assigned_sources[key].dec)/(count+1)
+                        # sc = SkyCoord(self.sources[source_idx][:i+1].positions) # too slow
+                        self.sources[source_idx].avg_position = SkyCoord(ra_new, dec_new, equinox=assigned_sources[key].equinox, frame=self.equinox)
+                        self.sources[source_idx].frame_count += 1
+                        
                     elif key not in source_list:
                         positions = [SkyCoord([]*un.deg, []*un.deg, equinox=assigned_sources[key].equinox, frame=self.equinox)]*self.n_frames
                         positions[i] = assigned_sources[key]
                         source = radio_source(key, positions, assigned_sources[key])
+                        source.frame_count += 1
                         self.sources.append(source)
         return
     
-    
+    def calc_space_change(self):
+        """
+        Finds the separation and position angle between persistently detected sources and their mean position. Informative for understanding shifts due to the ionosphere. Updates the 'separations' and 'pos_angles' values in the frames of the self.frame_source_dict property
+        """ 
+        for i, source in enumerate(self.sources):
+            self.sources[i].calc_space_change()
+        return
 
 class radio_source:
     def __init__(self, label:str, positions = None, avg_position=None, seps = None, pos_angs=None):
@@ -491,102 +500,37 @@ class radio_source:
         self.seps = seps
         self.pos_angs = pos_angs
         self.avg_position = avg_position
+        self.frame_count = 0
         return
     
-    def update_avg_position(self, avg_position:SkyCoord):
-        self.avg_position = avg_position
+    def calc_space_change(self, return_vals=False):
+        pos_angles = np.zeros(len(self.positions))
+        separations = np.zeros(len(self.positions))
+        for j, _ in enumerate(pos_angles):
+            if self.positions[j].size != 0:
+                pos_angles[j] = self.avg_position.position_angle(self.positions[j]).to('deg').value
+                separations[j] = self.avg_position.separation(self.positions[j]).to('arcmin').value
+            else:
+                separations[j] = np.nan
+                pos_angles[j] = np.nan
+            
+        self.pos_angs = pos_angles * un.deg
+        self.seps = separations * un.arcmin
+        if return_vals:
+            return separations, pos_angles
         return
-    
-    def update_persistent(self, persistent:bool):
-        self.persistent = persistent
-        return
-    
-    def update_seps(self, sep, concat=True):
-        if self.seps is not None:
-            if concat:
-                self.seps = np.concatenate((self.seps, [sep]))
-        if self.seps is None or not concat:
-            self.seps = np.array([sep])
-        return
-    
-    def update_pos_angs(self, pos_ang, concat=True):
-        if self.pos_angs is not None:
-            if concat:
-                self.pos_angs = np.concatenate((self.pos_angs, [pos_ang]))
-        if self.pos_angs is None or not concat:
-            self.pos_angs = np.array([pos_ang])
-        return
+
         
     def save(self):
         return
         
-    # def crossmatch_frames(self, ref_frame:obs_frame, new_frame:obs_frame, max_sep=None):
-    #     if max_sep is None:
-    #         max_sep = self.max_sep
-            
-    #     if self.sources is None:
-    #         self.make_reference_frame()
-        
-    #     all_known_sources = self.sources
-    #     all_known_source_pos = SkyCoord([s.avg_position for s in all_known_sources])
-    #     all_known_source_names = [s.label for s in all_known_sources]
-        
-    #     ref_sources = ref_frame.sources
-    #     ref_positions = SkyCoord([s.position for s in ref_sources]) #only want to use reference sources that have a source label assignment
-        
-    #     new_positions = SkyCoord(new_frame.positions)
-        
-    #     ref_idxs, cm_seps, __ = new_positions.cross_match(ref_positions)
-    #     ref_idxs_uniq = np.unique(ref_idxs)[0] # don't want to replicate searches of ref_idxs
-    #     far_sources = new_positions[cm_seps>max_sep] # source positions for sources that were not near any reference sources
-    #     near_sources = new_positions[cm_seps <= max_sep]
-        
-    #     identified_source_names = []
-    #     # for each reference source that got a crossmatch, find the closest new source that had small separations
-    #     for ri in ref_idxs_uniq:
-    #         ref_source = ref_sources[ri] 
-    #         seps = ref_source.position.separation(near_sources)
-    #         if seps.min() < max_sep:
-    #             source_position = near_sources[seps == seps.min()] # the closest source position to the reference source
-    #             source_name = ref_source.label
-    #             avg_position = SkyCoord([ref_source.avg_position, source_position])
-    #             avg_position_update = SkyCoord(avg_position.ra.mean(), avg_position.dec.mean())
-    #             rs = radio_source(source_name, source_position, avg_position=avg_position_update)
-    #             new_frame.sources.append(rs) # update source list for the frame
-    #             idx = all_known_source_names.index(source_name)
-    #             all_known_sources[idx] = rs
-    #             identified_source_names.append(source_name)
-                
-        
-    #     # for new sources that were far away, check if they are near the average position of any previously-found sources    
-    #     for source in far_sources:
-    #         cm_all, cm_all_seps, __ = source.match_to_catalog_sky(all_known_source_pos) # gets the closest source that is near
-            
-        
-        
-    #     return new_frame, all_known_source_names
-    
-    
-  
+
                 
         
 #%%
 class lightcurve_extraction:
     def __init__(self, source, full_frame_fns: list, out_dir: str, obs_time=None):
 
-        # come from find_associated_sources():
-        self.beam_shape_flux_threshold = 8
-        self.fwhm = 8
-        self.frame_source_dict = {}
-        self.frame_source_dict.update({f"frame_{str(i).zfill(3)}":{} for i in range(len(self.full_frame_fns))}) # dictionary of labelled sources per frame
-        self.max_sep = 0.2
-        self.source_dict = None
-        
-
-        
-        # comes from find_persistent_sources():
-        self.n_source = None
-        self.persistent_sources = None # dictionary of sources that showed up persistently in the frames, along with the frame and position
         
         # comes from get_star_positions
         self.star_positions = None
@@ -594,27 +538,7 @@ class lightcurve_extraction:
         # comes from get_star_fluxes
         self.star_fluxes = None
         self.times = None
-        return
-
-    
-    def find_separation_and_pos_angs(self):
-        """
-        Finds the separation and position angle between persistently detected sources and their mean position. Informative for understanding shifts due to the ionosphere. Updates the 'separations' and 'pos_angles' values in the frames of the self.frame_source_dict property
-        """
-        if self.persistent_sources is None:
-            self.find_persistent_sources()
-            
-        for i,sources in enumerate(self.source_positions):
-            frame_key = f"frame_{str(i).zfill(3)}"
-            sa = self.frame_source_dict[frame_key]["sources"]
-            source_keys = [k for k in sa if k in self.persistent_sources.keys()]
-            for k in source_keys:
-                idx = self.frame_source_dict[frame_key]['sources'].index(k)
-                mean_pos = self.persistent_sources[k]
-                sep = mean_pos.separation(self.frame_source_dict[frame_key]['positions'][idx])
-                pos_ang = mean_pos.position_angle(self.frame_source_dict[frame_key]['positions'][idx])
-                self.frame_source_dict[frame_key]['separations'][idx] = sep.value
-                self.frame_source_dict[frame_key]['pos_angles'][idx] = pos_ang.value
+        
         return
     
     def get_source_flux(self, source_keys, frame_key:str = None, frame_idx:int = None, get_bkg_rms=False):

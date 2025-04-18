@@ -219,6 +219,13 @@ class beam:
         self.bpa = bpa
         return
         
+class background:
+    def __init__(self, mean, median, std, rms):
+        self.mean = mean
+        self.median = median
+        self.std = std
+        self.rms = rms
+        return
     
 class obs_frame:
     def __init__(self, file_name, index=None, working_directory=None):
@@ -231,6 +238,7 @@ class obs_frame:
         self.cropped_filepath= None
         self.cropped_wcs = None
         self.index = index
+        self.background = background(None, None, None, None)
         return
     
     def __update_frame(self):
@@ -284,7 +292,7 @@ class obs_frame:
         self.cropped_wcs = sub_frame.wcs
         return
     
-    def __get_data_and_wcs(self, cropped):
+    def get_data_and_wcs(self, cropped):
         if cropped:
             fn = self.cropped_filepath
             f = fits.open(fn)[0]
@@ -305,7 +313,7 @@ class obs_frame:
         return dat, w, fn
     
     def get_source_positions(self, sigma_threshold=4, cropped=True, verbose=False):
-        dat, w, fn = self.__get_data_and_wcs(cropped)
+        dat, w, fn = self.get_data_and_wcs(cropped)
             
         dao = DAOStarFinder(threshold=sigma_threshold*rms(dat) + np.nanmedian(dat), fwhm=self.beam.bmaj*2, ratio=self.beam.bmin/self.beam.bmaj, theta=(90 + self.beam.bpa))
         sources = dao(dat)
@@ -319,8 +327,55 @@ class obs_frame:
             self.source_positions = SkyCoord([]*un.deg, []*un.deg)
         return
     
+    def get_background_stats(self, cropped=True):
+        dat, w, fn = self.get_data_and_wcs(cropped)
+        dat_mask = np.zeros(dat.shape)
+        
+        a = self.beam.bmaj
+        b = self.beam.bmin
+        theta = self.beam.bpa + 90
+        
+        sources = self.source_positions
+        
+        for idx, pos in enumerate(sources):
+            ap = EllipticalAperture(w.world_to_pixel(pos), a, b, theta=theta*un.deg)
+            mask = ap.to_mask()
+            try:
+                dat_mask[mask.bbox.iymin:mask.bbox.iymax,mask.bbox.ixmin:mask.bbox.ixmax] = mask.data
+            except:
+                pass
+        dat_masked = np.ma.masked_array(dat, dat_mask)
+        self.background.rms = rms(dat_masked)
+        self.background.mean = np.nanmean(dat_masked)
+        self.background.median = np.nanmedian(dat_masked)
+        self.background.std = np.nanstd(dat_masked)
+        return
+    
+    def get_source_fluxes(self, cropped=True, positions=None):
+        dat, w, fn = self.get_data_and_wcs(cropped)
+        if positions is None:
+            poss = self.source_positions
+        elif positions is not None:
+            poss = positions
+            
+        if type(poss) is not list and poss.size ==1:
+            poss = [poss]
+            
+        fluxes = np.zeros(len(poss))
+        for i,pos in enumerate(poss):
+            if pos.size != 0:
+                x,y = w.world_to_pixel(pos)
+                x = int(np.round(x))
+                y = int(np.round(y))
+                flux = dat[y,x]
+                fluxes[i] = flux
+            else:
+                fluxes[i] == np.nan
+            
+        return fluxes
+    
     def plot_frame(self, source_of_interest:SkyCoord = None, cropped=True, plot_sources=True, plot_source_of_interest=False):
-        dat, w,fn = self.__get_data_and_wcs(cropped)
+        dat, w, fn = self.get_data_and_wcs(cropped)
         fig, ax = plt.subplots(1,1)
         ax.imshow(dat, origin = 'lower')
         if plot_sources and self.source_positions is not None:
@@ -361,6 +416,7 @@ class observation:
         
         self.max_sep = max_sep
         self.sources = []
+        self.source_fluxes = np.array([])
         self.latest_idx_w_source = None
         self.equinox = 'fk5'
         self.n_frames = len(self.full_frame_fns)
@@ -485,20 +541,41 @@ class observation:
                         self.sources.append(source)
         return
     
-    def calc_space_change(self):
-        """
-        Finds the separation and position angle between persistently detected sources and their mean position. Informative for understanding shifts due to the ionosphere. Updates the 'separations' and 'pos_angles' values in the frames of the self.frame_source_dict property
-        """ 
+    def calc_space_changes(self):
         for i, source in enumerate(self.sources):
             self.sources[i].calc_space_change()
         return
+    
+    def get_fluxes_single_frame(self, frame_idx:int, get_bkg=False, cropped=True):
+        frame = self.frames[frame_idx]
+        dat, w, fn = frame.get_data_and_wcs(cropped)
+        if get_bkg:
+            frame.get_background_stats(cropped)
+        
+        positions = [s.positions[frame_idx] for s in self.sources]
+        fluxes = frame.get_source_fluxes(cropped, positions)
+        
+        return fluxes
+
+    
+    def get_fluxes_all_frames(self, get_bkg=False, cropped=True):
+        """
+        Gets fluxes for all persistent_sources across all frames
+        """
+        fluxes = np.zeros((self.n_frames, len(self.sources)))
+        for i, frame in enumerate(self.frames):
+            fluxes[i] = self.get_fluxes_single_frame(i, get_bkg, cropped)
+        self.source_fluxes = fluxes    
+        return 
+    
 
 class radio_source:
-    def __init__(self, label:str, positions = None, avg_position=None, seps = None, pos_angs=None):
+    def __init__(self, label:str, positions = None, avg_position=None, seps = None, pos_angs=None, fluxes=None):
         self.label = label
         self.positions = positions
         self.seps = seps
         self.pos_angs = pos_angs
+        self.fluxes = fluxes
         self.avg_position = avg_position
         self.frame_count = 0
         return
@@ -541,92 +618,7 @@ class lightcurve_extraction:
         
         return
     
-    def get_source_flux(self, source_keys, frame_key:str = None, frame_idx:int = None, get_bkg_rms=False):
-        """
-        gets the flux for all sources indicated by source_keys for a given frame
-        :param source_keys: the name of the source to extract flux from
-        :type source_keys: str
-        :param frame_key: the the name of the frame in the frame_source_dict property to reference for extracting source flux
-        :type frame_key: str
-        :param frame_idx: alternative to frame_key parameter-- the index of the frame to reference for extracting source flux
-        :type frame_idx: int
-        :param get_bkg_rms: if True, returns the source-subtracted noise of the frame that the flux was extracted from
-        :type get_bkg_rms: bool
-        :return flux, [bkg_rms]: the flux of the source and, if get_bkg_rms is true, the noise of the source-subtracted frame
-        :rtype: float, [float]
-        """
-        assert((frame_key != None) or (frame_idx != None)), "Either frame_key or frame_idx needs to be defined"
-        if frame_key is not None:
-            assert(frame_key in self.frame_source_dict.keys()), f"Frame key {frame_key} not recognized"
-            frame_idx = int(frame_key.split("_")[-1])
-               
-        elif frame_idx is not None:
-            frame_key = f"frame_{str(frame_idx).zfill(3)}"
-            
-        if type(source_keys) is str:
-            source_keys = [source_keys]
-        
-        flux = np.zeros(len(source_keys))
-        
-        f = fits.open(self.crop_fns[frame_idx])[0]
-        hdr = f.header
-        dat = f.data[0,0,:,:]
-        w = WCS(hdr, naxis=2)
-        for i, k in enumerate(source_keys):
-            if k in self.frame_source_dict[frame_key]['sources']:
-                idx = self.frame_source_dict[frame_key]['sources'].index(k)
-                position = self.frame_source_dict[frame_key]['positions'][idx]
-
-                x,y = w.world_to_pixel(position)
-                x = int(np.round(x))
-                y = int(np.round(y))
-                flux[i] = dat[y,x]
-
-            elif k not in self.frame_source_dict[frame_key]['sources']:
-                flux[i] = np.nan
-                
-        if get_bkg_rms:
-            dat_mask = np.zeros(dat.shape)
-            a = hdr['BMAJ']/hdr['CDELT2']
-            b = hdr['BMIN']/hdr['CDELT2']
-            theta = np.pi/2 + hdr['BPA']*un.deg.to('rad')
-            for idx, k in enumerate(self.frame_source_dict[frame_key]['sources']):
-                ap = EllipticalAperture(w.world_to_pixel(frame['positions'][idx]),a,b,theta=theta)
-                mask = ap.to_mask()
-                try:
-                    dat_mask[mask.bbox.iymin:mask.bbox.iymax,mask.bbox.ixmin:mask.bbox.ixmax] = mask.data
-                except:
-                    pass
-            dat_masked = np.ma.masked_array(dat, dat_mask)
-            bkg_rms[i] = np.sqrt(np.mean(dat_masked**2))      
-            return flux, bkg_rms
-        
-        return flux
     
-    def get_single_source_fluxes(self, source_key:str):
-        """
-        gets the fluxes for a single source across all frames
-        :param source_key: the name of the source to extract flux for
-        :type source_key: str
-        :return: fluxes for the source
-        :rtype: np.ndarray of floats
-        """
-        frame_keys = self.frame_source_dict.keys()
-        fluxes = np.zeros(len(frame_keys))
-        for i, k in enumerate(frame_keys):
-            fluxes[i] = self.get_source_flux(source_key, frame_key = k)[0]
-        return fluxes
-    
-    def get_all_source_fluxes(self):
-        """
-        Gets fluxes for all persistent_sources across all frames
-        """
-        frame_keys = self.frame_source_dict.keys()
-        source_keys = self.persistent_sources.keys()
-        fluxes = np.zeros((len(frame_keys), len(source_keys)))
-        for i, fk in enumerate(frame_keys):
-            fluxes[i] = self.get_source_flux(source_keys, frame_key = fk)
-        return fluxes
     
     def make_position_change_map(self, frame_idx, delta_ra=0.25*un.deg, delta_dec=0.25*un.deg, n_steps=1, n_iter=3, n_avg=3, plot=True, cmap='hsv'):
         source_keys = self.persistent_sources.keys()

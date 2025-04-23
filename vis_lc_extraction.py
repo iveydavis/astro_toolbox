@@ -596,18 +596,15 @@ class observation:
                 source_star_separations.append(self.source.separation(source.avg_position).to('arcmin').value)
                 
         if len(source_star_separations) != 0:
-            # I think this is wrong; normalizing the weights keeps the source position from changing as much as it should.
-            # I was putting the weights in the wrong place.
             source_star_separations = np.array(source_star_separations)
             weights = source_star_separations.sum()/source_star_separations
-            # weights_norm = weights/np.sum(weights**2)**0.5
-
-            # vecs_weight = (np.array(position_vectors).transpose()*weights_norm).transpose()
             vecs_sum = np.average(position_vectors, axis = 0, weights=weights)
             sep = (vecs_sum**2).sum()**0.5
             theta = np.arctan(vecs_sum[1]/vecs_sum[0])*un.rad
-            if theta < 0:
-                theta += 2*np.pi*un.rad
+            if vecs_sum[0] < 0:
+                theta += np.pi*un.rad
+            # if theta < 0:
+            #     theta += 2*np.pi*un.rad
             theta = -theta + 5*pi2
         elif len(source_star_separations) == 0:
             warnings.warn(f"No sources found in the field to estimate position offset for frame {frame_idx}")

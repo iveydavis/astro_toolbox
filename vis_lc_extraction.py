@@ -1,6 +1,5 @@
 import numpy as np
 import scipy.optimize as opt
-from scipy.ndimage.filters import uniform_filter
 
 from astropy.io import fits
 from astropy import units as un
@@ -10,35 +9,12 @@ from astropy.nddata import Cutout2D
 from astropy.coordinates import SkyCoord
 
 from photutils import DAOStarFinder, EllipticalAperture
-from SchedulingTools import AccessSIMBAD, ApplyProperMotion
 
 import matplotlib.pyplot as plt
-import matplotlib.colors as mc
-from matplotlib import patches
-import matplotlib as mp
-import colorsys
 
 import os
 import warnings
 import copy
-
-
-def adjust_lightness(color, amount = 0.5):
-    """
-    Adjusts lightness/darkness of a color (not changing opacity)
-    :param color: color to adjust
-    :type color: str
-    :param amount: amount to adjust color; higher is brighter and lower is darker
-    :type amount: float
-    :return: The adjusted color
-    :rtype: colorsys
-    """
-    try:
-        c = mc.cnames[color]
-    except:
-        c = color
-        c = colorsys.rgb_to_hls(*mc.to_rgb(c))
-    return colorsys.hls_to_rgb(c[0], max(0, min(1,amount*c[1])), c[2])
 
 
 def twoD_Gaussian(xy, amplitude, xo, yo, sigma_x, sigma_y, theta, offset):
@@ -389,25 +365,18 @@ class obs_frame:
             ap.plot(ax=ax, color = 'w')
         return fig, ax
     
-    def save(self):
-        return    
+    def save(self, outn=None):
+        if outn is None:
+            outn = os.path.join(self.working_directory,'')
+            outn = f"{outn}frame_class_data.npz"
+        np.savez(outn, self.__dict__)
+        return   
     
 
 class observation:
-    def __init__(self, source, full_frame_fns, out_dir, max_sep=0.2*un.deg, obstime: Time = None):
-        assert(type(source) == str or type(source) == SkyCoord)
-        if type(source) == str:
-            # if the source was given as a name, try to resolve in Simbad and apply proper-motion correction
-            try:
-                source = AccessSIMBAD(source)
-                self.source = source
-            except Exception as e:
-                raise Exception(f"Could not access {source} coordinates through SIMBAD: {e}")
-        elif type(source) == SkyCoord:
-            self.source = source
-            
-        if obstime is not None:
-            self.source = ApplyProperMotion(self.source, obstime)
+    def __init__(self, source:SkyCoord, full_frame_fns, out_dir, max_sep=0.2*un.deg):
+        
+        self.source = source
         
         if os.path.isdir(out_dir):
             self.out_dir = out_dir
@@ -651,6 +620,13 @@ class observation:
         self.source_fluxes = pix_flux
         return
     
+    def save(self, outn=None):
+        if outn is None:
+            outn = os.path.join(self.out_dir,'')
+            outn = f"{outn}observation_class_data.npz"
+        np.savez(outn, self.__dict__)
+        return
+    
 
 class radio_source:
     def __init__(self, label:str, positions = None, avg_position=None, seps = None, pos_angs=None, fluxes=None):
@@ -679,13 +655,12 @@ class radio_source:
         if return_vals:
             return separations, pos_angles
         return
-        
-    def save(self, outn=None):
-        if outn is None:
-            outn = os.path.join(self.out_dir,'')
-            outn = f"{outn}lightcurve_extraction_class_data.npz"
+    
+    def save(self, outn):
         np.savez(outn, self.__dict__)
         return
+        
+    
         
 def load_observation(fp):
     """
@@ -694,110 +669,23 @@ def load_observation(fp):
     :type fp: str
     """
     d = np.load(fp, allow_pickle=True)['arr_0'].flatten()[0]
-    lc_ext = lightcurve_extraction(source=d['source'], full_frame_fns=d['full_frame_fns'], out_dir=d['out_dir'], obs_time=d['obs_time'])
+    obs = observation(source=d['source'], full_frame_fns=d['full_frame_fns'], out_dir=d['out_dir'])
     for k in d.keys():
-        lc_ext.__dict__[k] = d[k]
-    return lc_ext
-                
-        
-#%%
-class lightcurve_extraction:
-    def __init__(self, source, full_frame_fns: list, out_dir: str, obs_time=None):
+        obs.__dict__[k] = d[k]
+    return obs
 
-        return
-    
-    
-    def make_position_change_map(self, frame_idx, delta_ra=0.25*un.deg, delta_dec=0.25*un.deg, n_steps=1, n_iter=3, n_avg=3, plot=True, cmap='hsv'):
-        source_keys = self.persistent_sources.keys()
-        frame_key = f"frame_{str(frame_idx).zfill(3)}"
-        
-        source_positions = []
-        source_separations = []
-        source_pos_angles = []
-        frame = self.frame_source_dict[frame_key]
-        for j,sk in enumerate(source_keys):
-            if sk in frame['sources']:
-                idx = frame['sources'].index(sk)
-                source_positions.append(frame['positions'][idx])
-                source_separations.append(frame['separations'][idx])
-                source_pos_angles.append(frame['pos_angles'][idx])
-            elif sk not in frame['sources']:
-                source_positions.append(SkyCoord(ra=0*un.deg, dec=0*un.deg, frame='fk5'))
-                source_separations.append(np.nan)
-                source_pos_angles.append(np.nan)
-                
-        seps = np.array(source_separations)
-        pos_angles = np.array(source_pos_angles)
-        coords = SkyCoord(source_positions)
-        ras = coords.ra
-        decs = coords.dec
-        
-        hdr = fits.open(self.crop_fns[frame_idx])[0].header
-        w = WCS(hdr, naxis=2)
-        min_pos = w.pixel_to_world(w.pixel_shape[0],0)
-        max_pos = w.pixel_to_world(0,w.pixel_shape[1])
-        ra_min = min_pos.ra
-        ra_max = max_pos.ra
-        dec_min = min_pos.dec
-        dec_max = max_pos.dec
-        
-        n_elements_dec = int((dec_max - dec_min)/delta_dec)
-        n_elements_ra = int((ra_max - ra_min)*np.cos((dec_max + dec_min)/2)/delta_ra)
-        #delta_ra = delta_ra * np.cos((dec_max + dec_min)/2)
-        delta_ra = delta_ra/np.cos((dec_max + dec_min)/2)
-        #print(delta_ra)
-        grid_pos_angles = np.zeros((n_elements_ra, n_elements_dec))
-        grid_seps = np.zeros((n_elements_ra, n_elements_dec))
-        for r in range(n_elements_ra):
-            if r == 0:
-                ra0 = ra_min
-            raf = ra0 + delta_ra
-            dec0 = dec_min
-            idxs_ra = np.where((ras >= ra0 - n_steps*delta_ra) & (ras <= raf+ n_steps*delta_ra))[0]
-            
-            for d in range(n_elements_dec):
-                decf = dec0 + delta_dec
-                if len(idxs_ra) != 0:
-                    ra_select_ra = ras[idxs_ra]
-                    ra_select_dec = decs[idxs_ra]
-                    idxs = np.where((ra_select_dec >=dec0 - n_steps*delta_dec) &(ra_select_dec<=decf+n_steps*delta_dec))[0]
-                    if len(idxs) == 0:
-                        sep_avg = 0
-                        pos_ang_avg = 0
-                    elif len(idxs) != 0:
-                        true_idxs = []
-                        for i in idxs:
-                            true_idxs.append(np.where(decs == ra_select_dec[i])[0][0])
-                        sep_avg = np.nanmean(seps[true_idxs])
-                        pos_ang_avg = np.nanmean(pos_angles[true_idxs])
-                    grid_seps[r,d] = sep_avg
-                    grid_pos_angles[r,d] = pos_ang_avg
-                elif len(idxs_ra) == 0:
-                    grid_seps[r,d] = 0
-                    grid_pos_angles[r,d] = 0
-                dec0 = decf
-            ra0 = raf
-        
-        count = 0
-        while count < n_iter:
-            grid_seps = uniform_filter(grid_seps, n_avg)
-            grid_pos_angles = uniform_filter(grid_pos_angles, n_avg)
-            count += 1
-        if plot:
-            hsv = mp.cm.get_cmap(cmap)
-            fig, ax = plt.subplots()
-            fig.set_figwidth(5)
-            fig.set_figheight(5)
-            for r in range(n_elements_ra):
-                for d in range(n_elements_dec):
-                    color = hsv(grid_pos_angles[r,d]/(2*np.pi))
-                    color = adjust_lightness(color, grid_seps[r,d]/np.max(grid_seps))
-                    patch = patches.Rectangle((r,d),1,1, color = color)
-                    ax.add_patch(patch)
-            ax.set_xlim([0,n_elements_ra])
-            ax.set_ylim([0,n_elements_dec])
-            plt.show()
-            return grid_seps, grid_pos_angles, fig, ax 
-        return grid_seps, grid_pos_angles
-    
+def load_source(fp):
+   d = np.load(fp, allow_pickle=True)['arr_0'].flatten()[0]
+   source = radio_source(label=d['label'], positions=d['positions'], avg_position=d['avg_position'], seps=d['seps'], pos_angs=d['pos_angs'], fluxes=d['fluxes'])
+   for k in d.keys():
+       source.__dict__[k] = d[k]
+   return source
+
+def load_frame(fp):
+    d = np.load(fp, allow_pickle=True)['arr_0'].flatten()[0]
+    frame = radio_source(file_name=d['file_name'], index=d['index'], working_directory=d['working_directory'])
+    for k in d.keys():
+        frame.__dict__[k] = d[k]
+    return frame
+  
             

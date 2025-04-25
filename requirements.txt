@@ -1,0 +1,6 @@
+astropy>=5
+astroquery
+matplotlib>=3
+numpy
+photutils>=1.11
+scipy>=1.7

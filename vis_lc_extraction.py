@@ -294,8 +294,9 @@ class obs_frame:
         dao = DAOStarFinder(threshold=sigma_threshold*rms(dat) + np.nanmedian(dat), fwhm=self.beam.bmaj*2, ratio=self.beam.bmin/self.beam.bmaj, theta=(90 + self.beam.bpa))
         sources = dao(dat)
         if len(sources) != 0:
-            sources_clip = sources[sources['peak'] > sigma_threshold*rms(dat) + np.nanmedian(dat) ]
-            source_clip_sc = w.pixel_to_world(sources_clip['xcentroid'], sources_clip['ycentroid'])
+            # sources_clip = sources[sources['peak'] > sigma_threshold*rms(dat) + np.nanmedian(dat) ]
+            # source_clip_sc = w.pixel_to_world(sources_clip['xcentroid'], sources_clip['ycentroid'])
+            source_clip_sc = w.pixel_to_world(sources['xcentroid'], sources['ycentroid'])
             self.source_positions = source_clip_sc
         elif len(sources) == 0:
             if verbose:
@@ -343,8 +344,9 @@ class obs_frame:
                 x,y = w.world_to_pixel(pos)
                 x = int(np.round(x))
                 y = int(np.round(y))
-                flux = dat[y,x]
-                fluxes[i] = flux
+                if 0 <= x < dat.shape[0] and 0 <= y < dat.shape[1]:
+                    flux = dat[y,x]
+                    fluxes[i] = flux
             else:
                 fluxes[i] == np.nan
             
@@ -390,6 +392,7 @@ class observation:
         
         self.detected_sources = []
         self.detected_source_fluxes = np.array([])
+        self.persistent_sources = None
         
         self.latest_idx_w_source = None
         self.equinox = 'fk5'
@@ -534,7 +537,28 @@ class observation:
         fluxes = frame.get_source_fluxes(cropped, positions)
         
         return fluxes
-
+    
+    def assign_persistent_sources(self, n_sources: int = None, frame_fraction=None):
+        frame_counts = [s.frame_count for s in self.detected_sources]
+        sources_sorted = [self.detected_sources[i] for i in np.argsort(frame_counts)]
+        sources_sorted.reverse()
+        frame_counts.sort(reverse=True)
+        
+        if n_sources is None:
+            if frame_fraction is None:
+                mean_detect = np.nanmean(np.array(frame_counts))
+                persistent_sources = np.array(sources_sorted)[np.array(frame_counts) >= mean_detect]
+            elif frame_fraction is not None:
+                persistent_sources = np.array(sources_sorted)[np.array(frame_counts) >= self.n_frames*frame_fraction]
+                
+        elif n_sources is not None:
+            persistent_sources = sources_sorted[:n_sources]
+        
+        fluxes = [np.nanmedian(s.fluxes) for s in persistent_sources]
+        persistent_sources = [persistent_sources[i] for i in np.argsort(fluxes)]
+        persistent_sources.reverse()
+        self.persistent_sources = persistent_sources
+        return
     
     def get_fluxes_all_frames(self, get_bkg=False, cropped=True):
         """
@@ -553,8 +577,11 @@ class observation:
         pi2 = np.pi/2 * un.rad
         source_star_separations = []
         position_vectors = []
-
-        for source in self.detected_sources:
+        
+        if self.persistent_sources is None:
+            self.assign_persistent_sources()
+            
+        for source in self.persistent_sources:
             if source.seps is None:
                 source.calc_space_change()
             if source.positions[frame_idx].size != 0:    

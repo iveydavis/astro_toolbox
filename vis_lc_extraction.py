@@ -313,14 +313,15 @@ class obs_frame:
         theta = self.beam.bpa + 90
         
         sources = self.source_positions
-        
-        for idx, pos in enumerate(sources):
-            ap = EllipticalAperture(w.world_to_pixel(pos), a, b, theta=theta*un.deg)
-            mask = ap.to_mask()
-            try:
-                dat_mask[mask.bbox.iymin:mask.bbox.iymax,mask.bbox.ixmin:mask.bbox.ixmax] = mask.data
-            except:
-                pass
+        if sources is not None:
+            for idx, pos in enumerate(sources):
+                ap = EllipticalAperture(w.world_to_pixel(pos), a, b, theta=theta*un.deg)
+                mask = ap.to_mask()
+                try:
+                    dat_mask[mask.bbox.iymin:mask.bbox.iymax,mask.bbox.ixmin:mask.bbox.ixmax] = mask.data
+                except:
+                    pass
+            
         dat_masked = np.ma.masked_array(dat, dat_mask)
         self.background.rms = rms(dat_masked)
         self.background.mean = np.nanmean(dat_masked)
@@ -354,7 +355,8 @@ class obs_frame:
     
     def plot_frame(self, source_of_interest:SkyCoord = None, cropped=True, plot_sources=True, plot_source_of_interest=False):
         dat, w, fn = self.get_data_and_wcs(cropped)
-        fig, ax = plt.subplots(1,1)
+        fig = plt.figure()
+        ax = fig.add_subplot(projection=w)
         ax.imshow(dat, origin = 'lower')
         if plot_sources and self.source_positions is not None:
             for source in self.source_positions:

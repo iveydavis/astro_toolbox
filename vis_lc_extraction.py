@@ -190,6 +190,18 @@ def rms(data):
 #%%
 class beam:
     def __init__(self, bmaj:"pix", bmin:"pix", bpa:"deg"):
+        """
+        Descriptor for the beam shape in an image
+        :param bmaj: Major axis of the beam in pixels; BMAJ/CDELT2 quantities in the header
+        :type bmaj: "pix"
+        :param bmin: Minor axis of the beam in pixels; BMIN/CDELT2 quantities in the header
+        :type bmin: "pix"
+        :param bpa: Beam position angle in degrees; BPA in the header
+        :type bpa: "deg"
+        :return: beam instance
+        :rtype: beam
+
+        """
         self.bmaj = bmaj
         self.bmin = bmin
         self.bpa = bpa
@@ -197,6 +209,20 @@ class beam:
         
 class background:
     def __init__(self, mean, median, std, rms):
+        """
+        Statistics for an image/ data in an obs_frame class
+        :param mean: mean value
+        :type mean: float
+        :param median: median value in the image
+        :type median: float
+        :param std: standard deviation in the image
+        :type std: float
+        :param rms: root-mean square of an image; calculated from the rms function
+        :type rms: float
+        :return: background instance
+        :rtype: background
+
+        """
         self.mean = mean
         self.median = median
         self.std = std
@@ -205,6 +231,18 @@ class background:
     
 class obs_frame:
     def __init__(self, file_name, index=None, working_directory=None):
+        """
+        Class for holding information for a frame in an observation
+        :param file_name: The name of the FITS file that has the data
+        :type file_name: str
+        :param index: The index of the frame within the larger observation. Not necessary if only investigating one frame, defaults to None
+        :type index: int, optional
+        :param working_directory: The directory that cropped frames will get saved to. If None, it defaults to the current working directory, defaults to None
+        :type working_directory: str, optional
+        :return: obs_frame instance
+        :rtype: obs_frame
+
+        """
         self.source_positions = None
         self.file_name = file_name
         self.timestamp = None
@@ -218,6 +256,10 @@ class obs_frame:
         return
     
     def __update_frame(self):
+        """
+        updates the obs_frame instance with the header, WCS, and time of the observation from the FITS header
+
+        """
         f = fits.open(self.file_name)
         self.header = f[0].header
         self.wcs = WCS(self.header, naxis=2)
@@ -227,6 +269,9 @@ class obs_frame:
         return 
     
     def __get_working_directory(self, working_directory):
+        """
+        Sets the working directory path
+        """
         if working_directory is not None:
             self.working_directory = working_directory
         elif working_directory is None:
@@ -235,6 +280,9 @@ class obs_frame:
         return
     
     def __get_beam(self):
+        """
+        Gets the beam information from the header. If the beam information isn't there, then it tries to derive the beam information from sources in the frame
+        """
         if "BMAJ" in list(self.header.keys()):
             pix_size = self.header["CDELT2"]
             self.beam = beam(self.header["BMAJ"]/pix_size, self.header["BMIN"]/pix_size, self.header["BPA"])
@@ -251,7 +299,18 @@ class obs_frame:
                 self.beam = None
         return
     
-    def crop_frame(self, center:SkyCoord, dimension: "pix" = 100, out_subdir=None, overwrite=True):
+    def crop_frame(self, center:SkyCoord, dimension: "pix" = 100, out_subdir=None, overwrite: bool = True):
+        """
+        Crops a frame to a small region centered on a source of interest. Updates the cropped_filepath and cropped_wcs properties
+        :param center: The SkyCoord position where the image should be centered on
+        :type center: SkyCoord
+        :param dimension: The x,y dimension of the cropped frame, defaults to 100
+        :type dimension: integer number of pixels, optional
+        :param out_subdir: The sub-directory under self.working_directory that cropped frames will get saved to. If None, data get saved to a subdirectory called cropped_frames/, defaults to None
+        :type out_subdir: str, optional
+        :param overwrite: If True, overwrites files of the same name that may already exist in the sub_dir, defaults to True
+        :type overwrite: bool, optional
+        """
         if out_subdir is None:
             out_subdir = 'cropped_frames/'
         out = os.path.join(self.working_directory, out_subdir, '')
@@ -268,7 +327,15 @@ class obs_frame:
         self.cropped_wcs = sub_frame.wcs
         return
     
-    def get_data_and_wcs(self, cropped):
+    def get_data_and_wcs(self, cropped: bool):
+        """
+        Returns the data, WCS, and fn for a file based on whether the cropped version is requested or not
+        :param cropped: Indicates whether the returned data should be the cropped or original data
+        :type cropped: bool
+        :return: Data, WCS, and filename of the frame
+        :rtype: numpy.ndarray, astropy.wcs.WCS, str
+
+        """
         if cropped:
             fn = self.cropped_filepath
             f = fits.open(fn)[0]
@@ -288,23 +355,36 @@ class obs_frame:
             w = self.wcs
         return dat, w, fn
     
-    def get_source_positions(self, sigma_threshold=4, cropped=True, verbose=False):
+    def get_source_positions(self, sigma_threshold=4, cropped: bool = True, verbose: bool = False):
+        """
+        Gets the positions of sources in the frame and saves the positions in the source_positions property
+        :param sigma_threshold: The factor of std that a source needs to be above the median value to be included as a source, defaults to 4
+        :type sigma_threshold: float, optional
+        :param cropped: If True, it searches for sources in the cropped frame. If False, it looks for sources in the original frame, defaults to True
+        :type cropped: bool, optional
+        :param verbose: If true, it will print the number of sources found, defaults to False
+        :type verbose: bool, optional
+        """
         dat, w, fn = self.get_data_and_wcs(cropped)
             
         dao = DAOStarFinder(threshold=sigma_threshold*rms(dat) + np.nanmedian(dat), fwhm=self.beam.bmaj*2, ratio=self.beam.bmin/self.beam.bmaj, theta=(90 + self.beam.bpa))
         sources = dao(dat)
         if len(sources) != 0:
-            # sources_clip = sources[sources['peak'] > sigma_threshold*rms(dat) + np.nanmedian(dat) ]
-            # source_clip_sc = w.pixel_to_world(sources_clip['xcentroid'], sources_clip['ycentroid'])
             source_clip_sc = w.pixel_to_world(sources['xcentroid'], sources['ycentroid'])
             self.source_positions = source_clip_sc
         elif len(sources) == 0:
-            if verbose:
-                print(f"No sources found in {fn}")
             self.source_positions = SkyCoord([]*un.deg, []*un.deg)
+        if verbose:
+            print(f"{len(sources)} found in {fn}")
         return
     
-    def get_background_stats(self, cropped=True):
+    def get_background_stats(self, cropped: bool = True):
+        """
+        Gets the background statistics by masking sources indicated by source_positions property. Statistics are saved to the background property
+        :param cropped: If cropped, it calculates statistics for the cropped frame, defaults to True
+        :type cropped: bool, optional
+
+        """
         dat, w, fn = self.get_data_and_wcs(cropped)
         dat_mask = np.zeros(dat.shape)
         
@@ -329,7 +409,17 @@ class obs_frame:
         self.background.std = np.nanstd(dat_masked)
         return
     
-    def get_source_fluxes(self, cropped=True, positions=None):
+    def get_source_fluxes(self, cropped: bool = True, positions=None):
+        """
+        Gets the fluxes of the sources
+        :param cropped: Indicates whether cropped files should be used, defaults to True
+        :type cropped: bool, optional
+        :param positions: Specific source positions that can be used to extract fluxes from. If None, then it uses the source positions in the source_position property, defaults to None
+        :type positions: list, optional
+        :return: The fluxes for the sources in the order of the list
+        :rtype: numpy.ndarray
+
+        """
         dat, w, fn = self.get_data_and_wcs(cropped)
         if positions is None:
             poss = self.source_positions
@@ -353,7 +443,21 @@ class obs_frame:
             
         return fluxes
     
-    def plot_frame(self, source_of_interest:SkyCoord = None, cropped=True, plot_sources=True, plot_source_of_interest=False):
+    def plot_frame(self, source_of_interest:SkyCoord = None, cropped: bool = True, plot_sources: bool = True, plot_source_of_interest: bool = False):
+        """
+        Plots the frame in the wcs projection and optionally the sources that were identified
+        :param source_of_interest: The position of the source of interest, defaults to None
+        :type source_of_interest: SkyCoord, optional
+        :param cropped: Indicates whether it should plot the cropped frame (True) or original frame (False), defaults to True
+        :type cropped: bool, optional
+        :param plot_sources: If True, it will plot ellipses at the position of the sources, defaults to True
+        :type plot_sources: bool, optional
+        :param plot_source_of_interest: If True, it will plot an ellipse at the position of the source of interest, defaults to False
+        :type plot_source_of_interest: bool, optional
+        :return: The figure and axis instance of the plot
+        :rtype: matplotlib.figure.Figure, matplotlib.axes._subplots.AxesSubplot
+
+        """
         dat, w, fn = self.get_data_and_wcs(cropped)
         fig = plt.figure()
         ax = fig.add_subplot(projection=w)
@@ -370,6 +474,12 @@ class obs_frame:
         return fig, ax
     
     def save(self, outn=None):
+        """
+        Saves the instance information that can be loaded in later
+        :param outn: The filepath for the data to be saved to. If None, it saves it in the working_directory as 'frame_class_data.npz', defaults to None
+        :type outn: str, optional
+
+        """
         if outn is None:
             outn = os.path.join(self.working_directory,'')
             outn = f"{outn}frame_class_data.npz"
@@ -378,8 +488,19 @@ class obs_frame:
     
 
 class observation:
-    def __init__(self, source:SkyCoord, full_frame_fns, out_dir, max_sep=0.2*un.deg):
-        
+    def __init__(self, source:SkyCoord, full_frame_fns, out_dir: str, max_sep=0.2*un.deg, freq_range=()):
+        """
+        Information on sources in a full observation of a given subband. Used for estimating the ionosphere's impact on source positions so that the flux can be derived from the correct location
+        :param source: The position of the source of interest. Images will be cropped around this location
+        :type source: SkyCoord
+        :param full_frame_fns: a list of FITS file names for the data
+        :type full_frame_fns: list of str
+        :param out_dir: The directory that cropped data will be saved to. Must already exist
+        :type out_dir: str
+        :param max_sep: the maximum distance that a source is allowed to be from its other positions to still be considered associated with a source label, defaults to 0.2*un.deg
+        :type max_sep: astropy.units.quantity.Quantity, optional
+        :raises Exception: if the out_dir is not an existing directory
+        """
         self.source = source
         
         if os.path.isdir(out_dir):
@@ -402,17 +523,43 @@ class observation:
         
         self.source_positions = np.array([]) # for the actual source of interest; not sources detected in the frames
         self.source_fluxes = np.array([])
+        
+        self.freq_range = freq_range
         return
     
     def __init_frames(self, fns, out_dir):
+        """
+        Initializes the obs_frame instances and assigns their indices
+        """
         frames = []
-        for i, fn in enumerate(fns):
-            frames.append(obs_frame(fn, i, out_dir))
-        self.frames = frames
-        self.timestamps = [Time(frame.timestamp) for frame in self.frames]
+        for fn in fns:
+            frames.append(obs_frame(fn, working_directory=out_dir))
+            
+        frames = frames
+        timestamps = [Time(frame.timestamp) for frame in frames]
+        ts_mjd = [ts.mjd for ts in timestamps]
+        
+        frames_sorted = [f for _,f in sorted(zip(ts_mjd, frames))]
+        for i, frame in enumerate(frames_sorted):
+            frame.index = i
+        self.frames = frames_sorted
+        
+        ts_mjd = ts_mjd.sort()
+        self.timestamps = Time(ts_mjd, format='mjd')
         return
     
-    def crop_frames(self, idx:int = None, dimension=100, out_subdir=None, overwrite=True):
+    def crop_frames(self, idx:int = None, dimension: "pix" = 100, out_subdir=None, overwrite: bool = True):
+        """
+        Crops all of the obs_frame instances in the frames property to the same size
+        :param idx: If only wanting to crop one frame, can specify the index of the frame to crop. If None, it crops all frames, defaults to None
+        :type idx: int, optional
+        :param dimension: The x,y dimension to crop the frames to, defaults to 100
+        :type dimension: integer number of pixels, optional
+        :param out_subdir: The subdirectory under working_directory to save data to. If None, data get saved to a subdirectory called cropped_frames/ defaults to None
+        :type out_subdir: str, optional
+        :param overwrite: If True, overwrites files of the same name that may already exist in the sub_dir, defaults to True
+        :type overwrite: bool, optional
+        """
         if idx is None:
             for frame in self.frames:
                 frame.crop_frame(self.source, dimension, out_subdir, overwrite)
@@ -431,6 +578,12 @@ class observation:
         return
     
     def start_reference_list(self):
+        """
+        Makes a starting list of sources that will be used as the starting crossmatch for future sources.
+        Updates the latest_idx_w_source propert, which keeps track of the index of the index of the frame that most recently had detected sources used to make the reference list
+        Updates detected_sources with the sources that were detected in the frame. This is the reference list
+
+        """
         obs_sources = []
         latest_idx_w_source = 0
         while len(obs_sources) == 0:
@@ -448,6 +601,18 @@ class observation:
         return
     
     def crossmatch(self, new_sources, max_sep: un.Quantity = None, ref_idx:int = None):
+        """
+        Cross matches new_sources with the positions of self.detected_sources to figure out the association between sources of different frames
+        :param new_sources: the list of source positions to be cross matched with the sources in the detected_sources property
+        :type new_sources: list of SkyCoord
+        :param max_sep: the maximum allowed separation between sources in two different frames for them to be considered the same. If None, it uses the max_sep property as the quantity, defaults to None
+        :type max_sep: un.Quantity, optional
+        :param ref_idx: The frame index to reference against other. If None, it uses the latest_idx_w_source property, defaults to None
+        :type ref_idx: int, optional
+        :return: A dictionary of sources and their association label
+        :rtype: dict
+
+        """
         if max_sep is not None:
             self.max_sep = max_sep
         elif max_sep is None:
@@ -493,6 +658,12 @@ class observation:
         return assigned_sources
     
     def build_observation_source_list(self, max_sep=None):
+        """
+        Crossmatches sources among all of the frames and builds the full list of sources that show up across the full observation
+        :param max_sep: The maximum separation allowed for a source in two different frames to be considered associated, If None, it uses the value in the max_sep property of the class. defaults to None
+        :type max_sep: astropy.units.quantity.Quantity, optional
+
+        """
         if max_sep is None:
             max_sep = self.max_sep
             
@@ -525,11 +696,27 @@ class observation:
         return
     
     def calc_space_changes(self):
+        """
+        Calculates the separation and position angle difference between a source in a given frame and its average position. Does this for all detected sources
+
+        """
         for i, source in enumerate(self.detected_sources):
             self.detected_sources[i].calc_space_change()
         return
     
-    def get_fluxes_single_frame(self, frame_idx:int, get_bkg=False, cropped=True):
+    def get_fluxes_single_frame(self, frame_idx:int, get_bkg: bool = False, cropped: bool = True):
+        """
+        Gets the fluxes for sources in a single frame
+        :param frame_idx: The index of the frame to get source fluxes from
+        :type frame_idx: int
+        :param get_bkg: If True, it will also get the background statistics, defaults to False
+        :type get_bkg: bool, optional
+        :param cropped: Indicates whether to use the cropped data, defaults to True
+        :type cropped: bool, optional
+        :return: The fluxes for the sources in the order of the sources listed in the frame
+        :rtype: np.ndarray
+
+        """
         frame = self.frames[frame_idx]
         dat, w, fn = frame.get_data_and_wcs(cropped)
         if get_bkg:
@@ -541,6 +728,14 @@ class observation:
         return fluxes
     
     def assign_persistent_sources(self, n_sources: int = None, frame_fraction=None):
+        """
+        Identifies the most persistently occuring sources. Updates persistent_sources property to be used for estimating source motion
+        :param n_sources: The number of sources to be considered persistent. If None then the number of persistent sources is determined by either the fraction of frames the source shows up in or the mean number of frames that sources show up in, defaults to None
+        :type n_sources: int, optional
+        :param frame_fraction: If this is not None and n_sources is None, then it is used to estimate the number of persistent sources based on the fraction of frames (<1) a source shows up in, defaults to None
+        :type frame_fraction: float < 1, optional
+
+        """
         frame_counts = [s.frame_count for s in self.detected_sources]
         sources_sorted = [self.detected_sources[i] for i in np.argsort(frame_counts)]
         sources_sorted.reverse()
@@ -562,9 +757,14 @@ class observation:
         self.persistent_sources = persistent_sources
         return
     
-    def get_fluxes_all_frames(self, get_bkg=False, cropped=True):
+    def get_fluxes_all_frames(self, get_bkg: bool = False, cropped: bool = True):
         """
-        Gets fluxes for all sources across all frames
+        Gets fluxes for all sources across all frames and updates the detected_source_fluxes property
+        :param get_bkg: If True, it gets the background statistics for the frames, defaults to False
+        :type get_bkg: bool, optional
+        :param cropped: Indicates if the data to be used is cropped, defaults to True
+        :type cropped: bool, optional
+
         """
         fluxes = np.zeros((self.n_frames, len(self.detected_sources)))
         for i, frame in enumerate(self.frames):
@@ -576,6 +776,14 @@ class observation:
         return 
     
     def find_weighted_position_change(self, frame_idx:int = None):
+        """
+        Uses the persistent sources' position changes to estimate the position of the source of interest
+        :param frame_idx: The index of the frame to get the position change. If None, it does it for all frames, defaults to None
+        :type frame_idx: int, optional
+        :return: The separation and position angle change of the source of interest
+        :rtype: astropy.units.quantity.Quantity, astropy.units.quantity.Quantity
+
+        """
         pi2 = np.pi/2 * un.rad
         source_star_separations = []
         position_vectors = []
@@ -633,7 +841,13 @@ class observation:
         self.source_positions = SkyCoord(positions)
         return
     
-    def get_star_fluxes(self, cropped=True):
+    def get_star_fluxes(self, cropped: bool = True):
+        """
+        Gets the flux of the source of interest and saves the information in self.source_fluxes
+        :param cropped: Indicates if the data to be used is cropped, defaults to True
+        :type cropped: bool, optional
+
+        """
         if self.source_positions is None:
             print("Finding corrected star/coordinate positions first")
             self.get_all_star_positions()
@@ -659,6 +873,22 @@ class observation:
 
 class radio_source:
     def __init__(self, label:str, positions = None, avg_position=None, seps = None, pos_angs=None, fluxes=None):
+        """
+        Holds information for unique sources identified in an observation
+        :param label: The label for the source
+        :type label: str
+        :param positions: The positions of the source throughout an observation, defaults to None
+        :type positions: list of SkyCoord, optional
+        :param avg_position: The average position of the source across the observation, defaults to None
+        :type avg_position: SkyCoord, optional
+        :param seps: The separation of the source in each frame from its average position, defaults to None
+        :type seps: numpy.ndarray, optional
+        :param pos_angs: The position angles of the source in each frame relative to its average position, defaults to None
+        :type pos_angs: numpy.ndarray, optional
+        :param fluxes: The flux of the source in each frame, defaults to None
+        :type fluxes: numpy.ndarray, optional
+
+        """
         self.label = label
         self.positions = positions
         self.seps = seps
@@ -669,6 +899,14 @@ class radio_source:
         return
     
     def calc_space_change(self, return_vals=False):
+        """
+        Calculates the separations and position angles to be stored in the seps and pos_angs properties respectively
+        :param return_vals: If True, it will return the separations and position angles in addition to updating the seps and pos_angs properties, defaults to False
+        :type return_vals: bool, optional
+        :return: if return_vals is True, the return values are the separations and position angles of the source relative to its average position
+        :rtype: numpy.ndarray, numpy.ndarray
+
+        """
         pos_angles = np.zeros(len(self.positions))
         separations = np.zeros(len(self.positions))
         for j, _ in enumerate(pos_angles):
@@ -685,15 +923,38 @@ class radio_source:
             return separations, pos_angles
         return
     
-    def save(self, outn):
+    def save(self, outn: str):
+        """
+        Saves the data to outn
+        :param outn: The file name including path to save the data to
+        :type outn: str
+
+        """
         np.savez(outn, self.__dict__)
         return
         
     
+class dyn_spec_production:
+    def __init__(self, observations):
+        assert(o.freq_range != () for o in observations), "The frequency range of each observation must be defined in the freq_range property"
+        self.observations = observations
+        self.frequencies = np.array([np.mean(o.freq_range)] for o in observations)
+        return
+
+    def find_common_sources(self):
+        return
+    
+    def make_dyn_spec(self):
+        return
+    
+    def plot_dyn_spec(self):
+        return
+    
+    
         
-def load_observation(fp):
+def load_observation(fp: str):
     """
-    loads in a lightcurve_extraction
+    loads in an observation
     :param fp: the filepath and name of the file resulting from lightcurve_extraction.save_data
     :type fp: str
     """
@@ -703,14 +964,14 @@ def load_observation(fp):
         obs.__dict__[k] = d[k]
     return obs
 
-def load_source(fp):
+def load_source(fp: str):
    d = np.load(fp, allow_pickle=True)['arr_0'].flatten()[0]
    source = radio_source(label=d['label'], positions=d['positions'], avg_position=d['avg_position'], seps=d['seps'], pos_angs=d['pos_angs'], fluxes=d['fluxes'])
    for k in d.keys():
        source.__dict__[k] = d[k]
    return source
 
-def load_frame(fp):
+def load_frame(fp: str):
     d = np.load(fp, allow_pickle=True)['arr_0'].flatten()[0]
     frame = radio_source(file_name=d['file_name'], index=d['index'], working_directory=d['working_directory'])
     for k in d.keys():

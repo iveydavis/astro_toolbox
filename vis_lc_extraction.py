@@ -544,7 +544,7 @@ class observation:
             frame.index = i
         self.frames = frames_sorted
         
-        ts_mjd = ts_mjd.sort()
+        ts_mjd.sort()
         self.timestamps = Time(ts_mjd, format='mjd')
         return
     
@@ -592,7 +592,7 @@ class observation:
                     source_name = f'source_{str(j+1).zfill(3)}'
                     positions = [SkyCoord([]*un.deg, []*un.deg, equinox=s.equinox, frame=self.equinox)]*self.n_frames
                     positions[latest_idx_w_source] = s 
-                    source = radio_source(source_name, positions, s)
+                    source = radio_source(source_name, positions, s, timestamps=self.timestamps, freq_range=self.freq_range)
                     obs_sources.append(source)
             else:
                 latest_idx_w_source += 1
@@ -690,7 +690,7 @@ class observation:
                     elif key not in source_list:
                         positions = [SkyCoord([]*un.deg, []*un.deg, equinox=assigned_sources[key].equinox, frame=self.equinox)]*self.n_frames
                         positions[i] = assigned_sources[key]
-                        source = radio_source(key, positions, assigned_sources[key])
+                        source = radio_source(key, positions, assigned_sources[key], timestamps=self.timestamps, freq_range=self.freq_range)
                         source.frame_count += 1
                         self.detected_sources.append(source)
         return
@@ -757,7 +757,7 @@ class observation:
         self.persistent_sources = persistent_sources
         return
     
-    def get_fluxes_all_frames(self, get_bkg: bool = False, cropped: bool = True):
+    def get_fluxes_all_frames(self, get_bkg: bool = True, cropped: bool = True):
         """
         Gets fluxes for all sources across all frames and updates the detected_source_fluxes property
         :param get_bkg: If True, it gets the background statistics for the frames, defaults to False
@@ -870,9 +870,30 @@ class observation:
         np.savez(outn, self.__dict__)
         return
     
+    def process(self, sigma_threshold=4, cropped: bool = True, verbose: bool = False, max_sep=0.2*un.deg, n_persistent=4):
+        """
+        Does all of the steps to estimate the position of the source of interest and extract its flux
+        :param sigma_threshold: The factor of std that a source needs to be above the median value to be included as a source, defaults to 4
+        :type sigma_threshold: float, optional
+        :param cropped: If True, it searches for sources in the cropped frame. If False, it looks for sources in the original frame, defaults to True
+        :type cropped: bool, optional
+        :param verbose: If true, it will print the number of sources found, defaults to False
+        :type verbose: bool, optional
+        :param max_sep: Maximum allowed separation for sources found in two frames to be considered the same radio_source, defaults to 0.2*un.deg
+        :type max_sep: astropy.units.quantity.Quantity, optional
+        """
+        self.find_sources(sigma_threshold=sigma_threshold, cropped=cropped, verbose=verbose)
+        self.start_reference_list()
+        self.build_observation_source_list(max_sep)
+        self.get_fluxes_all_frames()
+        self.assign_persistent_sources(n_persistent)
+        self.get_all_star_positions()
+        self.get_star_fluxes()
+        return
+    
 
 class radio_source:
-    def __init__(self, label:str, positions = None, avg_position=None, seps = None, pos_angs=None, fluxes=None):
+    def __init__(self, label:str, positions = None, avg_position=None, seps = None, pos_angs=None, fluxes=None, timestamps: Time = None, freq_range=None):
         """
         Holds information for unique sources identified in an observation
         :param label: The label for the source
@@ -896,6 +917,8 @@ class radio_source:
         self.fluxes = fluxes
         self.avg_position = avg_position
         self.frame_count = 0
+        self.timestamps = timestamps
+        self.freq_range = freq_range
         return
     
     def calc_space_change(self, return_vals=False):
@@ -923,6 +946,33 @@ class radio_source:
             return separations, pos_angles
         return
     
+    def plot_light_curve(self, xaxis:str = 'frame'):
+        """
+        Plots the light curve for the source
+        :param xaxis: Describes whether the xaxis is in frames or in mjd. Options are 'frame' and 'mjd', defaults to 'frame'
+        :type xaxis: str, optional
+        :return: the figure and axis instance of the plot
+        :rtype: matplotlib.figure.Figure, matplotlib.axes._subplots.AxesSubplot
+
+        """
+        allowed_xaxis = ['frame', 'mjd']
+        assert(xaxis.lower() in allowed_xaxis), f"xaxis must be in {allowed_xaxis}"
+        
+        if xaxis.lower() == 'frame':
+            xvec = np.linspace(0,len(self.fluxes)-1, len(self.fluxes))
+            xlabel = 'Frame number'
+            
+        elif xaxis.lower() == 'mjd':
+            xvec = self.timestamps.mjd
+            xlabel = 'MJD'
+            
+        fig, ax = plt.subplots(1,1)
+        ax.plot(xvec, self.fluxes)
+        ax.set_ylabel('Flux density', fontsize = 14)
+        ax.set_xlabel(xlabel, fontsize = 14)
+        ax.tick_params(axis='both', which='major', labelsize=12)
+        return fig, ax
+    
     def save(self, outn: str):
         """
         Saves the data to outn
@@ -932,25 +982,201 @@ class radio_source:
         """
         np.savez(outn, self.__dict__)
         return
+    
+
+
         
+class broad_spectrum_source:
+    def __init__(self, label, sources):
+        """
+        
+        :param label: the label of the source identified across multiple frequency bands
+        :type label: str
+        :param sources: the radio_source objects associated with this broad_spectrum source
+        :type sources: list of radio_source objects
+        """
+        self.label = label
+        self.sources = sources
+        self.center_freqs = [np.mean(source.freq_range) for source in sources]
+        self.df = [np.diff(source.freq_range)[0] for source in sources]
+        self.spectrum_fluxes = None
+        return
+    
+    def plot_dynspec(self, vmin = 0, vmax = 50, cmap='viridis'):
+        """
+        Plots the dynmaic spectrum
+        :param vmin: minimum flux density value for the waterfall plot, defaults to 0
+        :type vmin: float, optional
+        :param vmax: maximum flux density value for the waterfall plot, defaults to 50
+        :type vmax: float, optional
+
+        """
+        import matplotlib as mpl
+        import matplotlib.cm as cm
+        import matplotlib.colors as col
+        
+        norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+        cmap = cm.get_cmap(cmap)
+        c_map = cm.ScalarMappable(norm=norm, cmap=cmap)
+        
+        fig, ax = plt.subplots(1,1)
+        for idx, source in enumerate(self.sources):
+            for i in range(self.df[idx]):
+                freq = source.freq_range[0] + i
+                ax.scatter(source.timestamps.mjd, np.linspace(freq,freq, len(source.timestamps)), c= c_map.to_rgba(source.fluxes), lw =5, marker='s')
+            
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=col.Normalize(vmin=vmin, vmax=vmax))
+        cbar = fig.colorbar(sm)
+        cbar.set_label("Flux density [Jy]", fontsize=12)
+        return
+    
+    def get_spectrum(self):
+        """
+        Gets the spectrum flux densities and saves to the spectrum_fluxes property. Flux densities are in same order as the center_freqs property
+        """
+        self.spectrum_fluxes = np.zeros(len(self.sources))
+        for i, source in enumerate(self.sources):
+            self.spectrum_fluxes[i] = np.nanmedian(source.fluxes)
+        return
+    
+    def plot_spectrum(self):
+        """
+        Plots the spectrum.
+        """
+        if self.spectrum_fluxes is None:
+            self.get_spectrum()
+        plt.scatter(self.center_freqs, self.spectrum_fluxes)
+        plt.set_xlabel("Frequency [MHz]")
+        plt.set_ylabel("Flux density [Jy]")
+        
+
     
 class dyn_spec_production:
     def __init__(self, observations):
         assert(o.freq_range != () for o in observations), "The frequency range of each observation must be defined in the freq_range property"
         self.observations = observations
         self.frequencies = np.array([np.mean(o.freq_range)] for o in observations)
+        self.broadband_sources = None
+        self.broadband_source_of_interest = None
         return
+    
+    def process_observations(self, sigma_threshold=4, cropped: bool = True, verbose: bool = False,  max_sep=0.2*un.deg, n_persistent=4):
+        """
+        Processes all of the observations
+        :param sigma_threshold: DESCRIPTION, defaults to 4
+        :type sigma_threshold: TYPE, optional
+        :param cropped: DESCRIPTION, defaults to True
+        :type cropped: bool, optional
+        :param verbose: DESCRIPTION, defaults to False
+        :type verbose: bool, optional
+        :param max_sep: DESCRIPTION, defaults to 0.2*un.deg
+        :type max_sep: TYPE, optional
+        :return: DESCRIPTION
+        :rtype: TYPE
 
-    def find_common_sources(self):
+        """
+        for o in self.observations:
+            o.process(sigma_threshold, cropped, verbose, max_sep, n_persistent)
         return
     
-    def make_dyn_spec(self):
+    def find_broadband_sources(self, cross_match = 0.1*un.deg):
+        """
+        Finds sources that are associated with each other across multiple bands
+        :param cross_match: maximum allowable separation for sources in two bands to be associated with each other, defaults to 0.1*un.deg
+        :type cross_match: astropy.units.quantity.Quantity, optional
+
+        """
+        assert(all(len(o.detected_sources) > 0 for o in self.observations)), f"No list of sources for {o.freq_range}. Either run find_sources and build_observation_source_list or remove from observations list"
+        source_lists = []
+        for o in self.observations:
+            source_list = [source for source in o.detected_sources]
+            source_lists.append(source_list)
+            
+        source_count = 0
+        assigned_sources = {}
+        common_source_list = []
+        for i, o in enumerate(source_lists):
+            for s in o:
+                pos = s.avg_position
+                key = f'source_{str(source_count).zfill(3)}' 
+                assigned_sources.update({key:[s]})
+                for j in range(len(source_lists)- 1 - i):
+                    new_obs = source_lists[j+i+1]
+                    ref_sources = SkyCoord([source.avg_position for source in new_obs])
+                    idx, sep, __  = pos.match_to_catalog_sky(ref_sources)
+                    if sep < cross_match:
+                        assigned_sources[key].append(new_obs[idx])
+                        new_obs.pop(idx)
+                source_count += 1
+                common_source_list.append(broad_spectrum_source(key, assigned_sources[key]))
+        self.broadband_sources = common_source_list
+                
         return
     
-    def plot_dyn_spec(self):
+    def make_broadband_source_of_interest(self):
+        """
+        Makes a broad-band source instance for the source/star of interest
+
+        """
+        sources = []
+        for obs in self.observations:
+            source_positions = obs.source_positions
+            fluxes = obs.source_fluxes
+            source = radio_source('source_of_interest', source_positions, obs.source, fluxes=fluxes, timestamps=obs.timestamps, freq_range=obs.freq_range)
+            sources.append(source)
+        self.broadband_source_of_interest = broad_spectrum_source('source_of_interest', sources)
         return
     
+    def plot_dyn_spec(self, source_of_interest=True, source_label: str = None, vmin=0, vmax=50, cmap: str = 'viridis'):
+        """
+        Plots a dynamic spectrum for the specified source
+        :param source_of_interest: If True, plots the dyn spec for the source of interest. If False, plots dyn spec for a source specified by its label, defaults to True
+        :type source_of_interest: bool, optional
+        :param source_label: If not None, plots the dyn spec for a source of the given label, defaults to None
+        :type source_label: str, optional
+        :param vmin: Minimum flux density for the dyn spec, defaults to 0
+        :type vmin: float, optional
+        :param vmax: Maximum flux density for the dyn spec, defaults to 50
+        :type vmax: float, optional
+        :param cmap: colormap name for the dyn spec, defaults to 'viridis'
+        :type cmap: str, optional
+
+        """
+        if source_of_interest is False:
+            assert(source_label is not None), f"Need to either indicate the source of interest or the source_label" 
+            
+        if source_of_interest:
+            if self.broadband_source_of_interest is None:
+                self.make_broadband_source_of_interest()
+            self.broadband_source_of_interest.plot_dynspec(vmin, vmax, cmap=cmap)
+                
+                
+        elif not source_of_interest:
+            keys = [source.label for source in self.broad_sources()]
+            idx = keys.index(source_label)
+            source = self.broad_sources[idx]
+            source.plot_dyn_spec(vmin, vmax, cmap=cmap)
+        return
     
+
+    
+    
+def make_dyn_spec(source_loc:SkyCoord, out_dir=None, frame_dirs = [], freq_ranges=[]):
+    import glob
+    assert(len(frame_dirs) == len(freq_ranges))
+    observations = []
+    for i, d in enumerate(frame_dirs):
+        fns = glob.glob(d)
+        fns.sort()
+        print(f"Building observation for images in {d}")
+        o = observation(source_loc, fns, out_dir, freq_range=freq_ranges[i])
+        o.process()
+        
+    ds = dyn_spec_production(observations)
+    ds.find_common_sources()
+    ds.make_broadband_source_of_interest()
+    ds.make_dyn_spec()
+    return ds
         
 def load_observation(fp: str):
     """

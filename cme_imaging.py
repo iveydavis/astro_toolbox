@@ -32,8 +32,10 @@ class CME:
         self.grid_mass = None
         self.grid_number = None
         self.spectral_cube = None
-        self.wavelengths = np.linspace(self.wav_min, self.wav_max, 10)
+        self.wavelengths = np.linspace(self.wav_min, self.wav_max, 10)*un.nm
         self.sfr = None
+        self.system_distance = None
+        self.grid_angular = None
         return
     
     def build_sfr(self, **kwargs):
@@ -213,7 +215,7 @@ class CME:
             cme, star = self.make_spectral_grid(temp, radius, wavelengths[i], wavelengths[i+1])
             spectral_cube[i] = cme
         self.spectral_cube = spectral_cube*un.erg/un.s
-        self.wavelengths = np.linspace(wav_min.value, wav_max.value, n_grids)
+        self.wavelengths = np.linspace(wav_min.value, wav_max.value, n_grids)*un.nm
         return 
     
     def plot_cme3D(self):
@@ -235,17 +237,29 @@ class CME:
         vals = np.zeros(self.spectral_cube.shape[0])
         for i, grid in enumerate(self.spectral_cube):
             grid[grid == np.inf] = 0
-            vals[i] = np.nansum(grid)
+            vals[i] = np.nansum(grid.to('erg/s').value)
         fig = plt.figure()
         ax = fig.add_subplot()
-        ax.plot(self.wavelengths, vals)
+        ax.plot(self.wavelengths.to('nm').value, vals)
+        ax.set_xlabel("Wavelength [nm]")
+        ax.set_ylabel("Luminosity [erg/s]")
         return fig, ax
     
     def convert_energy_to_photon_flux(self):
-        return
+        if type(self.wavelengths) != un.Quantity:
+            print("assuming wavelength is in nanometers")
+            self.wavelengths *= un.nm
+        grid_photons = np.zeros(self.spectral_cube.shape)
+        for i, grid in enumerate(self.spectral_cube):
+            phot_e = const.h * const.c/self.wavelengths[i]
+            grid_photons[i] = grid/phot_e
+        self.grid_photons = grid_photons
+        return grid_photons
     
     def convert_linear_to_angular(self, system_distance):
-        return
+        self.grid_angular = (self.grid_distance/system_distance).to('')*un.rad.to('arcsec')
+        self.system_distance = system_distance
+        return self.grid_angular
     
     
     def save(self, fn):

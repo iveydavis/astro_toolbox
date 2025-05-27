@@ -462,7 +462,7 @@ def NoisePerFrame(D, nPix, readoutNoise = 6, magVec = np.linspace(3,15,100),fram
 
 
 #%% Noise Calculation 
-def CalculateNoise(D, integrationTime, nPix, readoutNoise = 6, magVec = np.linspace(3,16,100),frameRate = 1/u.s,chi = 1.5,pixelScale =None):
+def CalculateNoise(D, integrationTime, nPix, readoutNoise = 6, magVec = np.linspace(3,14,100),frameRate = 1/u.s,chi = 1.5,pixelScale =None):
     try:
         D = D.to('m')
     except:
@@ -518,15 +518,16 @@ def CalculateNoise(D, integrationTime, nPix, readoutNoise = 6, magVec = np.linsp
     #ax.add_patch(rect_saturation)
     
     plt.xlabel('Star Magnitude',fontsize = 14)
-    plt.ylabel(r'ppm',fontsize = 14)
-    plt.title(r'$n_{pix}$ = '+str(int(nPix))+r', $\chi$ = '+str(chi)+', # Frames = '+str(int(nFrames))+', Exp. time/frame = '+str(integrationTime/nFrames),fontsize=14)
+    plt.ylabel(r'Noise Contribution [ppm]',fontsize = 14)
+    plt.title(r'$n_{pix}$ = '+str(int(nPix))+r', $\chi$ = '+str(chi)+', # Frames = '+str(int(nFrames))+', D = '+str(D),fontsize=14)
     plt.legend(fontsize = 12)
-    plt.tight_layout()
+    
     plt.xlim((magVec.min(),magVec.max()))
     plt.xticks(fontsize = 15)
     plt.yticks(fontsize = 15)
     plt.grid('on')
     plt.show()
+    plt.tight_layout()
     return totalNoise
 #%% Plotting Tools
 plt.rcParams.update({'font.family':'calibri'})

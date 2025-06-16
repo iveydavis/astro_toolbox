@@ -15,7 +15,6 @@ from scipy import integrate
 
 def check_units(**kwargs):
     kwarg_keys = list(kwargs.keys())
-    print(kwarg_keys)
     return_dict = {}
     for k in kwarg_keys:
         if 'radius' in k:
@@ -152,12 +151,13 @@ class CME:
         self.grid_number = None
         return
     
-    def build_sfr(self, **kwargs):
+    def build_sfr(self, verbose=False, **kwargs):
         keys = ['toroidal_height', 'half_width', 'half_height', 'pancaking', 'flattening']
         kwarg_keys = list(kwargs.keys())
         for k in keys:
             if k not in kwarg_keys:
-                print(f"{k} not in provided arguments, using value from the class instance")
+                if verbose:
+                    print(f"{k} not in provided arguments, using value from the class instance")
                 kwargs.update({f'{k}': self.__dict__[k]})
         sfr = StaticFRi3D(
             toroidal_height=kwargs["toroidal_height"],
@@ -182,7 +182,7 @@ class CME:
             print("Building CME model")
             
         if self.sfr is None and 'sfr' not in kwarg_keys:
-            self.build_sfr()
+            self.build_sfr(verbose=False)
             sfr = self.sfr
         
         phi = np.linspace(-sfr.half_width, sfr.half_width, kwargs["phi_dim"])
@@ -368,12 +368,11 @@ class Star:
         dist_norm = self.grid_distances/(self.linear_extent)
         theta = (self.linear_extent/self.distance).to('') * un.rad.to('arcsec')
         self.grid_distances_angular = dist_norm*theta
-        self.pix_res_ang = theta/self.dim
+        self.pix_res_ang = theta*un.arcsec/self.dim
         self.angular_extent = theta*un.arcsec
         return
     
-    def plot(self, wind=True, cme=True, scale='linear', logscale=True):
-        assert(scale.lower() == 'linear' or scale.lower() == 'angular')
+    def plot(self, wind=True, cme=True, logscale=True):
         dat = np.zeros(self.grid_cme_photons.shape) * (un.s * un.cm**2)**-1
         title = f"System distance : {self.distance}"
         if wind:
@@ -385,16 +384,9 @@ class Star:
         # convert to flux received by a detector
         dat = (dat * self.pix_res**2/ (4 * np.pi * self.distance**2)).to('s**-1 * cm**-2')
         
-        if scale.lower() == "linear":
-            d = self.linear_extent.to('AU').value
-            axis_label = 'Distance [AU]'
-            cbar_label = r'photons/s/cm$^2$'
-            
-        elif scale.lower() == "angular":
-            d = self.angular_extent.to('arcsec').value
-            dat = dat * self.pix_res**2 /self.pix_res_ang**2
-            axis_label = 'Distance [arcsec]'
-            cbar_label = r'photons/s/arcsec$^2$'
+        d = self.linear_extent.to('AU').value
+        axis_label = 'Distance [AU]'
+        cbar_label = r'photons/s/cm$^2$'
             
         if logscale:
             dat = np.log10(dat.value)

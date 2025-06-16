@@ -14,8 +14,6 @@ from scipy import integrate
 
 
 def check_units(**kwargs):
-    
-    
     kwarg_keys = list(kwargs.keys())
     print(kwarg_keys)
     return_dict = {}
@@ -48,7 +46,7 @@ def check_units(**kwargs):
                 distance = distance*un.pc
             return_dict.update({k:distance.to('pc')})
                 
-        if "Mdot" in k:
+        if "Mdot" in k or "mdot" in k:
             Mdot = kwargs[k]
             if type(Mdot) != un.Quantity:
                 print("assuming Mdot is in units of solar masses per year")
@@ -62,6 +60,8 @@ def check_units(**kwargs):
                 vwind = vwind * un.km/un.s
             return_dict.update({k:vwind.to('km/s')})
     return return_dict
+
+
 def stellar_spectral_luminosity(wavelength, temp, radius):
     if type(radius) != un.Quantity:
         # print("assuming radius is in units of solar radii")
@@ -90,6 +90,7 @@ def calculate_stellar_luminosity(wavelength_range, temp, radius):
     lum, toss = integrate.quad(stellar_spectral_luminosity, wav_min, wav_max, (d['temp'].value, d['radius'].value))
     return lum*un.erg/un.s
 
+
 class Wind:
     def __init__(self, dim:int, Mdot, vwind, linear_extent, wavelength_range=[100,1000]*un.nm):
         if dim % 2 == 0:
@@ -115,8 +116,7 @@ class Wind:
         y_grid = x_grid.transpose()
         
         self.grid_distances = ((x_grid/self.dim)**2 + (y_grid/self.dim)**2)**0.5 * self.linear_extent
-        # self.grid_stellar_energy_fluxes = (self.stellar_luminosity/(4 * np.pi *self.grid_distances**2)).to('erg/s/cm**2')
-        # self.grid_stellar_photon_fluxes = (self.grid_stellar_energy_fluxes * self.center_lambda /(const.h * const.c)).to("s**-1 * cm**-2")
+        # not particles per se, but essentially the fraction of the pixel area that is covered by particle area?
         self.grid_wind_particles = (const.sigma_T * self.Mdot/(8 * self.grid_distances * self.vwind * const.u.cgs)).to("")
         return
 
@@ -284,7 +284,6 @@ class CME:
         self.grid_mass = self.grid_norm * mass
         self.grid_number = (self.grid_mass/const.u.cgs).to('')
         return 
-
     
     def plot_cme3D(self):
         phi = np.linspace(-self.sfr.half_width, self.sfr.half_width, self.phi_dim)
@@ -300,20 +299,11 @@ class CME:
         ax.set_zlabel('z')
         plt.show()
         return
-
     
     def convert_linear_to_angular(self, system_distance):
         self.grid_angular = (self.grid_distance/system_distance).to('')*un.rad.to('arcsec')
         self.system_distance = system_distance
         return self.grid_angular
-    
-    
-    def save(self, fn):
-        return
-    
-    def load_cme(self, fn):
-        dat = np.load(fn)
-        return
 
 
 class Star:
@@ -384,13 +374,15 @@ class Star:
     
     def plot(self, wind=True, cme=True, scale='linear', logscale=True):
         assert(scale.lower() == 'linear' or scale.lower() == 'angular')
-        if wind and cme:
-            dat = self.grid_wind_photons + self.grid_cme_photons
-        elif wind and not cme:
-            dat = self.grid_wind_photons
-        elif cme and not wind:
-            dat = self.grid_cme_photons
-        
+        dat = np.zeros(self.grid_cme_photons.shape) * (un.s * un.cm**2)**-1
+        title = f"System distance : {self.distance}"
+        if wind:
+            dat += self.grid_wind_photons
+            title = f"{title}\nMdot={self.wind.Mdot}, v_wind={self.wind.vwind}"
+        if cme:
+            dat += self.grid_cme_photons
+            title = f"{title}\n CME mass={self.cme.mass}"
+        # convert to flux received by a detector
         dat = (dat * self.pix_res**2/ (4 * np.pi * self.distance**2)).to('s**-1 * cm**-2')
         
         if scale.lower() == "linear":
@@ -411,8 +403,10 @@ class Star:
         extents = [-d/2, d/2,-d/2, d/2]
         fig, ax = plt.subplots(1,1)
         im = ax.imshow(dat, extent=extents)
+
         ax.set_xlabel(axis_label)
         ax.set_ylabel(axis_label)
+        ax.set_title(title)
         cbar = plt.colorbar(im)
         cbar.set_label(cbar_label)
         

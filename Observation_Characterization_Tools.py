@@ -42,7 +42,15 @@ class PhotometricBands:
         Lens efficiency is from the silica lens numbers, not the quartz
         """
         name = self.name
-        acceptableNames= ['u','g','r','i','U','B','V']
+        acceptableNames= ['u','g','r','i','U','B','V', 'tess']
+        if name.lower() == 'tess':
+            name = name.lower()
+            self.bandwidth = 400*u.nm
+            self.centerLambda = 800*u.nm
+            self.lensEfficiency = 0.99
+            self.mirrorEfficiency = 0.99
+            self.zeroPoint = 1539.3*fluxUnit
+            self.skyMag = 21.34
         if name == 'u':
             self.bandwidth = 65*u.nm
             self.centerLambda = 352.5*u.nm

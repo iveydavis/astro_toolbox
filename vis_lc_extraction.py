@@ -9,6 +9,7 @@ from astropy.nddata import Cutout2D
 from astropy.coordinates import SkyCoord
 
 from photutils import DAOStarFinder, EllipticalAperture
+from photutils.detection import find_peaks
 
 import matplotlib.pyplot as plt
 
@@ -120,7 +121,7 @@ def get_beam_shape_params_circ(fn, dpix=12, update_file_header=True, threshold=8
     return popt
 
 
-def get_beam_shape_params_iter(fn, update_file_header=True, subframe_radius = (50,50), std_threshold = 6, niter = 21, sma=15, eps=0.7, pa=2):
+def get_beam_shape_params_iter(fn, update_file_header=True, subframe_radius = (20,20), std_threshold = 6, niter = 21, sma=15, eps=0.7, pa=2):
     """
     Gets the beam shape parameters that can be used in twoD_Gaussian to construct a psf. Necessary if the data were not deconvolved. This is slower than get_beam_shape_params_circ, but can identify even extremely elliptical sources.
     :param fn: the filename of the image to be used to derive beam shape parameters
@@ -142,33 +143,40 @@ def get_beam_shape_params_iter(fn, update_file_header=True, subframe_radius = (5
     f = fits.open(fn)[0]
     data = f.data
     data_new = copy.deepcopy(data)
+    
+    w = WCS(f.header, naxis = 2)
+    w._naxis = [w._naxis[0], w._naxis[1]]
+    
+    pks = find_peaks(data, threshold = std_threshold * rms(data) + np.nanmedian(data))
+    pks.sort('peak_value', reverse=True)
+    
     thresh = 5*std_threshold # preliminary threshold to enter the while loop
-    iter_count = 1 # keeps track of the iteration
     data_std = np.nanstd(data)
-    while thresh > std_threshold and iter_count < niter:
-        idx_max = np.where(data_new == np.nanmax(data_new))
-        x_max, y_max= int(idx_max[0][0]), int(idx_max[1][0])
-        subframe = data_new[x_max-subframe_radius[0]:x_max+subframe_radius[0], y_max-subframe_radius[1]:y_max+subframe_radius[1]]
+    
+    for i, pk in enumerate(pks):
+        subframe = data_new[pk[1]-subframe_radius[0]:pk[1]+subframe_radius[0], pk[0]-subframe_radius[1]:pk[0]+subframe_radius[1]]
         thresh = np.nanstd(subframe)/data_std
-        if thresh >= std_threshold:
-            data_new[x_max-subframe_radius[0]:x_max+subframe_radius[0], y_max-subframe_radius[1]:y_max+subframe_radius[1]] = np.nan
-        iter_count += 1
+        if thresh < std_threshold:
+            break
+        if i == niter:
+            break
     
     if thresh >= std_threshold:
         # if it never reaches a std that suggests there's only one source in the subframe to extract a solution from
         warnings.warn(f"STD threshold was never met ({thresh})")
         popt = np.array([0,0,0,0,0,0,0])
     
-    try:
-        xarr = np.linspace(0, subframe.shape[0]-1, subframe.shape[0])
-        yarr = np.linspace(0, subframe.shape[1]-1, subframe.shape[1])
-        xarr, yarr = np.meshgrid(xarr, yarr)
-        p0 = (np.nanmax(subframe), subframe.shape[0]/2, subframe.shape[1]/2, 3, 3, 0 , np.nanmedian(subframe))
-        popt, pcov = opt.curve_fit(twoD_Gaussian, (xarr, yarr), subframe.ravel(), p0=p0)
-        
-    except:
-        warnings.warn("Could not get beam parameters")
-        popt = np.array([0,0,0,0,0,0,0])
+    elif thresh < std_threshold:
+        try:
+            xarr = np.linspace(0, subframe.shape[0]-1, subframe.shape[0])
+            yarr = np.linspace(0, subframe.shape[1]-1, subframe.shape[1])
+            xarr, yarr = np.meshgrid(xarr, yarr)
+            p0 = (np.nanmax(subframe), subframe.shape[0]/2, subframe.shape[1]/2, 3, 3, 0 , np.nanmedian(subframe))
+            popt, pcov = opt.curve_fit(twoD_Gaussian, (xarr, yarr), subframe.ravel(), p0=p0)
+            
+        except:
+            warnings.warn("Could not get beam parameters")
+            popt = np.array([0,0,0,0,0,0,0])
         
     if update_file_header:
         # save solutions to the header of the file:
@@ -230,7 +238,7 @@ class background:
         return
     
 class obs_frame:
-    def __init__(self, file_name, index=None, working_directory=None):
+    def __init__(self, file_name, index=None, working_directory=None, cropped=False):
         """
         Class for holding information for a frame in an observation
         :param file_name: The name of the FITS file that has the data
@@ -249,8 +257,12 @@ class obs_frame:
         self.__update_frame()
         self.__get_working_directory(working_directory)
         self.__get_beam()
-        self.cropped_filepath= None
-        self.cropped_wcs = None
+        if not cropped:
+            self.cropped_filepath= None
+            self.cropped_wcs = None
+        elif cropped:
+            self.cropped_filepath = file_name
+            self.cropped_wcs = self.wcs
         self.index = index
         self.background = background(None, None, None, None)
         return
@@ -322,7 +334,15 @@ class obs_frame:
         data = fits.open(self.file_name)[0].data[0,0,:,:]
         sub_frame = Cutout2D(data, center, dimension, self.wcs)
         out_name = os.path.join(out, self.file_name.split('/')[-1].replace('.fits', '_cropped.fits'))
-        fits.writeto(out_name, sub_frame.data, sub_frame.wcs.to_header(), overwrite=overwrite)
+        
+        header_orig_keys = list(self.header.keys())
+        header_new = sub_frame.wcs.to_header()
+        header_new_keys = list(header_new.keys())
+        for hk in header_orig_keys:
+            if hk not in header_new_keys and hk != "COMMENT" and hk!= "HISTORY":
+                header_new.append((hk, self.header[hk]))
+        
+        fits.writeto(out_name, sub_frame.data, header_new, overwrite=overwrite)
         self.cropped_filepath = out_name
         self.cropped_wcs = sub_frame.wcs
         return
@@ -355,7 +375,7 @@ class obs_frame:
             w = self.wcs
         return dat, w, fn
     
-    def get_source_positions(self, sigma_threshold=4, cropped: bool = True, verbose: bool = False):
+    def get_source_positions(self, sigma_threshold=4, cropped: bool = True, verbose: bool = False, do_max_pix_cut=False):
         """
         Gets the positions of sources in the frame and saves the positions in the source_positions property
         :param sigma_threshold: The factor of std that a source needs to be above the median value to be included as a source, defaults to 4
@@ -370,7 +390,11 @@ class obs_frame:
         dao = DAOStarFinder(threshold=sigma_threshold*rms(dat) + np.nanmedian(dat), fwhm=self.beam.bmaj*2, ratio=self.beam.bmin/self.beam.bmaj, theta=(90 + self.beam.bpa))
         sources = dao(dat)
         if len(sources) != 0:
-            source_clip_sc = w.pixel_to_world(sources['xcentroid'], sources['ycentroid'])
+            if do_max_pix_cut:
+                sources_clip = sources[sources['peak'] > sigma_threshold*rms(dat) + np.nanmedian(dat)]
+            else:
+                sources_clip = sources
+            source_clip_sc = w.pixel_to_world(sources_clip['xcentroid'], sources_clip['ycentroid'])
             self.source_positions = source_clip_sc
         elif len(sources) == 0:
             self.source_positions = SkyCoord([]*un.deg, []*un.deg)
@@ -488,7 +512,7 @@ class obs_frame:
     
 
 class observation:
-    def __init__(self, source:SkyCoord, full_frame_fns, out_dir: str, max_sep=0.2*un.deg, freq_range=()):
+    def __init__(self, source:SkyCoord, full_frame_fns, out_dir: str, max_sep=0.2*un.deg, freq_range=(), cropped: bool = False, load: bool = False):
         """
         Information on sources in a full observation of a given subband. Used for estimating the ionosphere's impact on source positions so that the flux can be derived from the correct location
         :param source: The position of the source of interest. Images will be cropped around this location
@@ -507,14 +531,15 @@ class observation:
             self.out_dir = out_dir
         elif not os.path.isdir(out_dir):
             raise Exception(f"{out_dir} is not an existing directory")
-            
+        
+        
         self.full_frame_fns = full_frame_fns
-        self.__init_frames(full_frame_fns, out_dir)
+        if not load:
+            self.__init_frames(full_frame_fns, out_dir, cropped)
         
         self.max_sep = max_sep
         
         self.detected_sources = []
-        self.detected_source_fluxes = np.array([])
         self.persistent_sources = None
         
         self.latest_idx_w_source = None
@@ -524,16 +549,17 @@ class observation:
         self.source_positions = np.array([]) # for the actual source of interest; not sources detected in the frames
         self.source_fluxes = np.array([])
         
-        self.freq_range = freq_range
+        self.freq_range = self.__get_freq_range(freq_range)
         return
     
-    def __init_frames(self, fns, out_dir):
+    
+    def __init_frames(self, fns, out_dir, cropped):
         """
         Initializes the obs_frame instances and assigns their indices
         """
         frames = []
         for fn in fns:
-            frames.append(obs_frame(fn, working_directory=out_dir))
+            frames.append(obs_frame(fn, working_directory=out_dir, cropped=cropped))
             
         frames = frames
         timestamps = [Time(frame.timestamp) for frame in frames]
@@ -547,6 +573,18 @@ class observation:
         ts_mjd.sort()
         self.timestamps = Time(ts_mjd, format='mjd')
         return
+    
+    def __get_freq_range(self, freq_range):
+        if len(freq_range) == 0:
+            try:
+                hdr = fits.open(self.full_frame_fns[0])[0].header
+                center = hdr['CRVAL3']
+                halfband = hdr['CDELT3']/2
+                freq_range = (center - halfband, center + halfband)
+            except:
+                raise Warning(f"Could not get frequency range from {self.full_frame_fns[0]}")
+                freq_range = ()
+        return freq_range
     
     def crop_frames(self, idx:int = None, dimension: "pix" = 100, out_subdir=None, overwrite: bool = True):
         """
@@ -771,8 +809,7 @@ class observation:
             fluxes[i] = self.get_fluxes_single_frame(i, get_bkg, cropped)
             
         for i, s in enumerate(self.detected_sources):
-            s.fluxes = fluxes.transpose()[i]
-        self.detected_source_fluxes = fluxes    
+            s.fluxes = fluxes.transpose()[i] 
         return 
     
     def find_weighted_position_change(self, frame_idx:int = None):
@@ -984,9 +1021,8 @@ class radio_source:
         return
     
 
-
         
-class broad_spectrum_source:
+class multi_freq_source:
     def __init__(self, label, sources):
         """
         
@@ -999,10 +1035,37 @@ class broad_spectrum_source:
         self.sources = sources
         self.center_freqs = [np.mean(source.freq_range) for source in sources]
         self.df = [np.diff(source.freq_range)[0] for source in sources]
-        self.spectrum_fluxes = None
+        self.dynamic_spectrum = None
+        self.__sort_by_frequency()
         return
     
-    def plot_dynspec(self, vmin = 0, vmax = 50, cmap='viridis'):
+    def __sort_by_frequency(self):
+        df_sorted = [df for _,df in sorted(zip(self.center_freqs,self.df))]
+        self.center_freqs.sort()
+        self.df = df_sorted
+        return
+    
+    def standardize_timestamps(self):
+        all_timestamps = []
+        for source in list(self.sources):
+            all_timestamps = list(set(all_timestamps + source.timestamps.tolist()))
+        all_timestamps.sort()
+        self.all_timestamps = all_timestamps
+        return
+    
+    def make_dynamic_spectrum(self, do_return=True):
+        dyn_spec = np.zeros((len(self.all_timestamps), len(self.sources))) * np.nan
+        for f, source in enumerate(self.sources):
+            for i, flux in enumerate(source.fluxes):
+                assert(len(source.fluxes) == len(source.timestamps))
+                idx = self.all_timestamps.index(source.timestamps[i])
+                dyn_spec[idx, f] = flux
+                    
+        self.dynamic_spectrum = dyn_spec.transpose()
+        if do_return:
+            return self.dynamic_spectrum
+    
+    def plot_dynspec(self, vmin = 0, vmax = 50, cmap='viridis', time_axis='hr'):
         """
         Plots the dynmaic spectrum
         :param vmin: minimum flux density value for the waterfall plot, defaults to 0
@@ -1011,53 +1074,58 @@ class broad_spectrum_source:
         :type vmax: float, optional
 
         """
-        import matplotlib as mpl
-        import matplotlib.cm as cm
-        import matplotlib.colors as col
+        if time_axis.lower() == 'hr':
+            tv = [t.mjd for t in self.timestamps - self.timestamps[0].mjd]
+            tv = np.array(tv)*24
+            xaxis_label = "Time since start [hr]"
+        elif time_axis.low() != 'hr':
+            tv = [t.mjd for t in self.timestamps - self.timestamps[0].mjd]
+            tv = np.array(tv)
+            xaxis_label = "Time since start [day]"
+        freq_min = self.center_freqs[0] - self.df[0]/2
+        freq_max = self.center_freqs[-1] + self.df[0]/2
         
-        norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
-        cmap = cm.get_cmap(cmap)
-        c_map = cm.ScalarMappable(norm=norm, cmap=cmap)
+        extents = [tv[0], tv[-1], freq_min/1e6, freq_max/1e6]
         
-        fig, ax = plt.subplots(1,1)
-        for idx, source in enumerate(self.sources):
-            for i in range(self.df[idx]):
-                freq = source.freq_range[0] + i
-                ax.scatter(source.timestamps.mjd, np.linspace(freq,freq, len(source.timestamps)), c= c_map.to_rgba(source.fluxes), lw =5, marker='s')
-            
-        sm = plt.cm.ScalarMappable(cmap=cmap, norm=col.Normalize(vmin=vmin, vmax=vmax))
-        cbar = fig.colorbar(sm)
-        cbar.set_label("Flux density [Jy]", fontsize=12)
+        fig, ax_dynspec = plt.subplots()
+        im = ax_dynspec.imshow(self.dynamic_spectrum, aspect = 'auto',origin = 'lower',extent=extents, cmap=cmap, interpolation='nearest')
+        im.set_clim(vmin=vmin, vmax=vmax)
+        
+        cbar = fig.colorbar(im, orientation='vertical')
+        cbar.set_label(r"Flux density [Jy]", fontsize=14)
+        cbar.update_ticks()
+        cbar.ax.tick_params(labelsize=12)
+        
+        ax_dynspec.set_ylabel('Frequency [MHZ]', fontsize=15)
+        ax_dynspec.tick_params(axis='both', which='major', labelsize=14)
+        ax_dynspec.tick_params(axis='y', which='both', labelsize=14)
+        ax_dynspec.set_xlabel(xaxis_label, fontsize=15)
         return
     
-    def get_spectrum(self):
-        """
-        Gets the spectrum flux densities and saves to the spectrum_fluxes property. Flux densities are in same order as the center_freqs property
-        """
-        self.spectrum_fluxes = np.zeros(len(self.sources))
-        for i, source in enumerate(self.sources):
-            self.spectrum_fluxes[i] = np.nanmedian(source.fluxes)
-        return
-    
-    def plot_spectrum(self):
-        """
-        Plots the spectrum.
-        """
-        if self.spectrum_fluxes is None:
-            self.get_spectrum()
-        plt.scatter(self.center_freqs, self.spectrum_fluxes)
-        plt.set_xlabel("Frequency [MHz]")
-        plt.set_ylabel("Flux density [Jy]")
-        
 
-    
-class dyn_spec_production:
+
+class multi_freq_obs:
     def __init__(self, observations):
-        assert(o.freq_range != () for o in observations), "The frequency range of each observation must be defined in the freq_range property"
         self.observations = observations
         self.frequencies = np.array([np.mean(o.freq_range)] for o in observations)
-        self.broadband_sources = None
-        self.broadband_source_of_interest = None
+        self.multi_freq_sources = []
+        self.multi_freq_star = None
+        self.__standardize_timestamps()
+        self.__sort_by_frequency()
+        return
+    
+    def __sort_by_frequency(self):
+        obs_sorted = [obs for _,obs in sorted(zip(self.frequencies,self.observations))]
+        self.observations = obs_sorted
+        self.frequencies.sort()
+        return
+    
+    def __standardize_timestamps(self):
+        all_timestamps = []
+        for source in list(self.sources):
+            all_timestamps = list(set(all_timestamps + source.timestamps.tolist()))
+        all_timestamps.sort()
+        self.all_timestamps = all_timestamps
         return
     
     def process_observations(self, sigma_threshold=4, cropped: bool = True, verbose: bool = False,  max_sep=0.2*un.deg, n_persistent=4):
@@ -1079,41 +1147,34 @@ class dyn_spec_production:
             o.process(sigma_threshold, cropped, verbose, max_sep, n_persistent)
         return
     
-    def find_broadband_sources(self, cross_match = 0.1*un.deg):
+
+    
+    def find_common_sources(self, max_sep = 0.1*un.deg):
         """
         Finds sources that are associated with each other across multiple bands
         :param cross_match: maximum allowable separation for sources in two bands to be associated with each other, defaults to 0.1*un.deg
         :type cross_match: astropy.units.quantity.Quantity, optional
 
         """
-        assert(all(len(o.detected_sources) > 0 for o in self.observations)), f"No list of sources for {o.freq_range}. Either run find_sources and build_observation_source_list or remove from observations list"
-        source_lists = []
-        for o in self.observations:
-            source_list = [source for source in o.detected_sources]
-            source_lists.append(source_list)
+        ref_sources = self.observations[0].persistent_sources
+        
+        for j, ref_source in enumerate(ref_sources):
+            source_list = [ref_source]
             
-        source_count = 0
-        assigned_sources = {}
-        common_source_list = []
-        for i, o in enumerate(source_lists):
-            for s in o:
-                pos = s.avg_position
-                key = f'source_{str(source_count).zfill(3)}' 
-                assigned_sources.update({key:[s]})
-                for j in range(len(source_lists)- 1 - i):
-                    new_obs = source_lists[j+i+1]
-                    ref_sources = SkyCoord([source.avg_position for source in new_obs])
-                    idx, sep, __  = pos.match_to_catalog_sky(ref_sources)
-                    if sep < cross_match:
-                        assigned_sources[key].append(new_obs[idx])
-                        new_obs.pop(idx)
-                source_count += 1
-                common_source_list.append(broad_spectrum_source(key, assigned_sources[key]))
-        self.broadband_sources = common_source_list
+            for i in range(len(self.observations)-1):
+                sources = self.observations[i + 1].persistent_sources
+                positions = [source.avg_position for source in sources]
+                idx, sep, __  = ref_source.avg_position.match_to_catalog_sky(SkyCoord(positions))
                 
+                if sep < max_sep:
+                    source_list.append(sources[idx])
+                    
+            mf_source = multi_freq_source(j, source_list)
+            self.multi_freq_sources.append(mf_source)
+                    
         return
     
-    def make_broadband_source_of_interest(self):
+    def make_multi_freq_star(self):
         """
         Makes a broad-band source instance for the source/star of interest
 
@@ -1124,44 +1185,11 @@ class dyn_spec_production:
             fluxes = obs.source_fluxes
             source = radio_source('source_of_interest', source_positions, obs.source, fluxes=fluxes, timestamps=obs.timestamps, freq_range=obs.freq_range)
             sources.append(source)
-        self.broadband_source_of_interest = broad_spectrum_source('source_of_interest', sources)
+        self.multi_freq_star = multi_freq_source('source_of_interest', sources)
         return
     
-    def plot_dyn_spec(self, source_of_interest=True, source_label: str = None, vmin=0, vmax=50, cmap: str = 'viridis'):
-        """
-        Plots a dynamic spectrum for the specified source
-        :param source_of_interest: If True, plots the dyn spec for the source of interest. If False, plots dyn spec for a source specified by its label, defaults to True
-        :type source_of_interest: bool, optional
-        :param source_label: If not None, plots the dyn spec for a source of the given label, defaults to None
-        :type source_label: str, optional
-        :param vmin: Minimum flux density for the dyn spec, defaults to 0
-        :type vmin: float, optional
-        :param vmax: Maximum flux density for the dyn spec, defaults to 50
-        :type vmax: float, optional
-        :param cmap: colormap name for the dyn spec, defaults to 'viridis'
-        :type cmap: str, optional
-
-        """
-        if source_of_interest is False:
-            assert(source_label is not None), f"Need to either indicate the source of interest or the source_label" 
-            
-        if source_of_interest:
-            if self.broadband_source_of_interest is None:
-                self.make_broadband_source_of_interest()
-            self.broadband_source_of_interest.plot_dynspec(vmin, vmax, cmap=cmap)
-                
-                
-        elif not source_of_interest:
-            keys = [source.label for source in self.broad_sources()]
-            idx = keys.index(source_label)
-            source = self.broad_sources[idx]
-            source.plot_dyn_spec(vmin, vmax, cmap=cmap)
-        return
     
-
-    
-    
-def make_dyn_spec(source_loc:SkyCoord, out_dir=None, frame_dirs = [], freq_ranges=[]):
+def process_multi_freq_obs(source_loc:SkyCoord, out_dir=None, frame_dirs = [], freq_ranges=[]):
     import glob
     assert(len(frame_dirs) == len(freq_ranges))
     observations = []
@@ -1172,11 +1200,10 @@ def make_dyn_spec(source_loc:SkyCoord, out_dir=None, frame_dirs = [], freq_range
         o = observation(source_loc, fns, out_dir, freq_range=freq_ranges[i])
         o.process()
         
-    ds = dyn_spec_production(observations)
-    ds.find_common_sources()
-    ds.make_broadband_source_of_interest()
-    ds.make_dyn_spec()
-    return ds
+    mf = multi_freq_obs(observations)
+    mf.find_common_sources()
+    mf.make_multi_freq_star()
+    return mf
         
 def load_observation(fp: str):
     """

@@ -329,6 +329,13 @@ class Star:
         self.wind = None
         return
     
+    def reset_spectral_properties(self, wavelength_range):
+        self.wavelength_range = wavelength_range
+        self.center_wave = (wavelength_range[0] + wavelength_range[1])/2 
+        self.photon_energy = (const.h*const.c/self.center_wave).to('erg')
+        self.make_stellar_grids()
+        return
+    
     def make_stellar_grids(self):
         x_grid = np.zeros((self.dim, self.dim))
         center = [int(self.dim/2+1), int(self.dim/2 +1)]

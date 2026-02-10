@@ -169,7 +169,7 @@ class CME:
         self.sfr = sfr
         return
     
-    def build_cme_normalized_grid(self, force_symmetry=True, **kwargs):
+    def build_cme_normalized_grid(self, force_symmetry=True, halo=False, **kwargs):
         keys = ['toroidal_height', 'half_width', 'half_height', 'pancaking', 'flattening', 'phi_dim', 'theta_dim', 'smooth_iter', 'smooth_window', 'verbose']
         kwarg_keys = list(kwargs.keys())
         
@@ -207,20 +207,27 @@ class CME:
         
         if kwargs["verbose"]:
             print("Filling gaps in flattened grid")
+        
         nsmooth = kwargs["smooth_window"]
         zero_idxs = np.where(grid == 0)
-        for idx in range(len(zero_idxs[0])):
-            x0 = zero_idxs[0][idx]-nsmooth
-            xe = zero_idxs[0][idx]+nsmooth
-            y0 = zero_idxs[1][idx]-nsmooth
-            ye = zero_idxs[1][idx]+nsmooth
-            if x0 < 0:
-                x0 = 0
-            if y0 < 0:
-                y0 = 0
-            dat_rang = grid[x0:xe, y0:ye]
-            grid[zero_idxs[0][idx], zero_idxs[1][idx]] = np.nanmedian(dat_rang)
-            
+        smooth_count = 1
+        count = 1
+        while count <= smooth_count:
+            for idx in range(len(zero_idxs[0])):
+                x0 = zero_idxs[0][idx]-nsmooth
+                xe = zero_idxs[0][idx]+nsmooth
+                y0 = zero_idxs[1][idx]-nsmooth
+                ye = zero_idxs[1][idx]+nsmooth
+                if x0 < 0:
+                    x0 = 0
+                if y0 < 0:
+                    y0 = 0
+                dat_rang = grid[x0:xe, y0:ye]
+                grid[zero_idxs[0][idx], zero_idxs[1][idx]] = np.nanmedian(dat_rang)
+            zero_idxs = np.where(grid == 0)
+            count +=1  
+        
+        
         if kwargs["verbose"]:
             print("Transferring flattened model to larger grid and smoothing")
         grid_copy = np.zeros((grid.shape[0]*2, grid.shape[1]*2))
@@ -250,9 +257,24 @@ class CME:
             grid_copy[:siz, :] = bottom_half
             grid_copy[siz:, :] = np.flip(bottom_half, axis=0)
             
+        
+            
         final_grid = np.zeros((self.dim, self.dim))
         center_final = (int(self.dim/2 + 1), int(self.dim/2 + 1))
         final_grid[center_final[0]-siz:center_final[0]+siz, center_final[0]:int(center_final[0]+siz*2)] = grid_copy
+        
+        if halo:
+            new_grid = np.zeros(final_grid.shape)
+            center = int(final_grid.shape[0]/2)-1
+            gridv = final_grid[center,center:]
+            theta_vec = np.linspace(0*un.rad, np.pi*2*un.rad, int(self.dim)*4)
+            for i, v in enumerate(gridv):
+                x = i * np.cos(theta_vec)
+                y = i * np.sin(theta_vec)
+                x = np.round(x).astype(int)
+                y = np.round(y).astype(int)
+                new_grid[y+center, x+center] = v
+            final_grid = new_grid  
         
         grid_norm = final_grid/np.sum(final_grid)
         self.grid_norm = grid_norm
@@ -349,12 +371,13 @@ class Star:
         self.linear_to_angular()
         return
     
-    def make_cme(self, mass=1e19*un.g, toroidal_height=1.5, half_width=45*np.pi/180, half_height=10*np.pi/180, pancaking=0.99, flattening=0.5, smooth=True, smooth_iter = 3, smooth_window=3, verbose=True):
+    def make_cme(self, mass=1e19*un.g, toroidal_height=1.5, half_width=45*np.pi/180, half_height=10*np.pi/180, pancaking=0.99, flattening=0.5, smooth=True, smooth_iter = 3, smooth_window=3, verbose=True, halo=False):
         cme = CME(toroidal_height=toroidal_height, half_width=half_width, half_height=half_height, pancaking=pancaking, flattening=flattening, phi_dim=int((self.dim-1)/8), theta_dim=int((self.dim-1)/4), smooth=smooth, smooth_iter =smooth_iter, smooth_window=smooth_window, dim=self.dim, verbose=True)
-        cme.build_cme_normalized_grid()
+        cme.build_cme_normalized_grid(halo=halo)
         cme.make_grids(mass=mass, linear_extent=self.linear_extent)
         self.cme = cme
         return
+    
     
     def make_wind(self, Mdot=30 * 2e-14 * un.M_sun/un.yr, vwind=400*un.km/un.s):
         wind = Wind(self.dim, Mdot=Mdot, vwind=vwind, linear_extent=self.linear_extent)

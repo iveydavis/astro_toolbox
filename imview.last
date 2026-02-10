@@ -1,0 +1,6 @@
+raster  = {}
+contour = {}
+zoom    = 1
+axes    = {}
+out     = ''
+#imview( raster={},contour={},zoom=1,axes={},out='' )

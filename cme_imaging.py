@@ -372,7 +372,8 @@ class Star:
         return
     
     def make_cme(self, mass=1e19*un.g, toroidal_height=1.5, half_width=45*np.pi/180, half_height=10*np.pi/180, pancaking=0.99, flattening=0.5, smooth=True, smooth_iter = 3, smooth_window=3, verbose=True, halo=False):
-        cme = CME(toroidal_height=toroidal_height, half_width=half_width, half_height=half_height, pancaking=pancaking, flattening=flattening, phi_dim=int((self.dim-1)/8), theta_dim=int((self.dim-1)/4), smooth=smooth, smooth_iter =smooth_iter, smooth_window=smooth_window, dim=self.dim, verbose=True)
+        phi_dim = int((self.dim-1)/8)
+        cme = CME(toroidal_height=toroidal_height, half_width=half_width, half_height=half_height, pancaking=pancaking, flattening=flattening, phi_dim=phi_dim, theta_dim=2*phi_dim, smooth=smooth, smooth_iter =smooth_iter, smooth_window=smooth_window, dim=self.dim, verbose=True)
         cme.build_cme_normalized_grid(halo=halo)
         cme.make_grids(mass=mass, linear_extent=self.linear_extent)
         self.cme = cme
@@ -402,7 +403,8 @@ class Star:
         self.angular_extent = theta*un.arcsec
         return
     
-    def plot(self, wind=True, cme=True, logscale=True):
+    def plot(self, wind=True, cme=True, logscale=True, scale='linear'):
+        
         dat = np.zeros(self.grid_cme_photons.shape) * (un.s * un.cm**2)**-1
         title = f"System distance : {self.distance}"
         if wind:
@@ -411,11 +413,15 @@ class Star:
         if cme:
             dat += self.grid_cme_photons
             title = f"{title}\n CME mass={self.cme.mass}"
-        # convert to flux received by a detector
-        dat = (dat * self.pix_res**2/ (4 * np.pi * self.distance**2)).to('s**-1 * cm**-2')
         
-        d = self.linear_extent.to('AU').value
-        axis_label = 'Distance [AU]'
+        if scale.lower() == 'linear':
+            # convert to flux received by a detector
+            dat = (dat * self.pix_res**2/ (4 * np.pi * self.distance**2)).to('s**-1 * cm**-2')
+            d = self.linear_extent.to('AU').value
+            axis_label = 'Distance [AU]'
+        elif scale.lower() == 'angular':
+            d = self.angular_extent.to('arcsec').value
+            axis_label = 'Distance [arcsec]'
         cbar_label = r'photons/s/cm$^2$'
             
         if logscale:
